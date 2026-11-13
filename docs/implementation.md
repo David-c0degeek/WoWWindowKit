@@ -1,5 +1,28 @@
 # Implementation decisions and pre-mortem
 
+## Catch / forget follow-up (v1.0.2)
+
+PM-4 — Medium — A forgotten window is immediately recaptured by the existing
+one-second auto-discovery loop. [evidence: Rescan automatically fills free slots]
+Keep a session exclusion set keyed by HWND, PID, and process start time. Forget
+restores the original window and excludes it from layout, mouse focus and keys.
+Only explicit catch clears the matching exclusion. Replacing an occupied slot
+with an outside window also excludes the displaced client. Switching two managed
+clients exchanges their account numbers. Reject stale/closed choices and invalid
+slot numbers without mutating assignments. Freeze discovery/focus while choosing
+from tray menus. Catch resets numbered positions so selecting slot N also gives
+the window that account's swap key. Test repeated rescans, restoration, recapture,
+replacement, closed candidates, both profile sizes, and dark tray menu wiring.
+Verdict: PROCEED WITH GUARDRAILS. Original app folders remain untouched.
+
+PM-4 resolution: Mitigated. 83 native-window/integration checks pass with no
+skipped groups, including tray action wiring, forgotten-window restoration and
+exclusion through repeated scans, explicit reassignment, slot 10 replacement,
+displaced-window exclusion, and rejection of a closed menu candidate. Tests also
+caught a startup visibility edge case: restoring a newly created client's placement
+could leave it hidden. Restoration now explicitly shows an originally visible
+window if needed. Release compilation is clean after the nullable test fix.
+
 Scope: independent C# Windows tray app, 5-man/10-man layout profiles, borderless windows,
 account-specific swap hotkeys, and focus following the mouse only over managed WoW windows.
 No focus-only bindings. Original app folders, launchers, and settings remain untouched.

@@ -31,6 +31,9 @@ internal sealed class WindowManager : IDisposable
     private nint lastHover;
     private long retryFocusAfter;
     private readonly Func<int, bool>? testProcess;
+    private readonly HashSet<(nint Handle, int Pid, long Start)> forgotten = [];
+    private static (nint Handle, int Pid, long Start) Identity(ManagedWindow window) => (window.Handle, window.Pid, window.StartTicks);
+    internal bool IsForgotten(ManagedWindow window) => forgotten.Contains(Identity(window));
     internal WindowManager(AppSettings settings, Func<int, bool>? testProcess = null) { Settings = settings; this.testProcess = testProcess; }
 
     internal IReadOnlyList<ManagedWindow> Discover()
@@ -56,6 +59,9 @@ internal sealed class WindowManager : IDisposable
             if (!info.Eligible) return true;
             var placement = new Native.Placement { Length = System.Runtime.InteropServices.Marshal.SizeOf<Native.Placement>() };
             if (!Native.GetWindowPlacement(window, ref placement)) return true;
+            // A just-created visible window can briefly report SW_HIDE during startup.
+            // Restoring that transitional state would hide the window when forgotten.
+            if (placement.ShowCmd == 0) placement.ShowCmd = 1;
             found.Add(new ManagedWindow { Handle = window, Pid = pid, StartTicks = info.Start,
                 Title = Native.Title(window), OriginalStyle = Native.GetWindowLongPtr(window, Native.GwlStyle), OriginalPlacement = placement });
             return true;
@@ -66,7 +72,8 @@ internal sealed class WindowManager : IDisposable
     internal void Rescan()
     {
         if (Editing) return;
-        var candidates = Discover();
+        forgotten.RemoveWhere(id => !Native.IsWindow(id.Handle) || Native.GetWindowThreadProcessId(id.Handle, out var pid) == 0 || pid != id.Pid);
+        var candidates = Discover().Where(w => !IsForgotten(w)).ToList();
         var changed = false;
         foreach (var pair in Accounts.ToArray())
         {
@@ -172,19 +179,31 @@ internal sealed class WindowManager : IDisposable
     }
     internal void Assign(int account, nint handle)
     {
+        if (account < 1 || account > Settings.Current.Slots.Count) throw new ArgumentOutOfRangeException(nameof(account), "Choose a slot in the active layout.");
         var other = Accounts.FirstOrDefault(p => p.Value.Handle == handle);
         var window = other.Value ?? Discover().FirstOrDefault(w => w.Handle == handle)
             ?? throw new InvalidOperationException("That window has closed.");
         if (!window.Valid) throw new InvalidOperationException("That window has closed. Reopen settings to refresh the list.");
         Accounts.TryGetValue(account, out var displaced);
+        if (displaced?.Handle == handle) return;
+        if (displaced?.Valid != true) displaced = null;
+        forgotten.Remove(Identity(window));
         if (other.Value != null) Accounts.Remove(other.Key);
         if (displaced != null && displaced.Handle != handle)
         {
             if (other.Value != null) Accounts[other.Key] = displaced;
-            else Restore(displaced);
+            else { forgotten.Add(Identity(displaced)); Restore(displaced); }
         }
         Accounts[account] = window;
         ResetLayout();
+    }
+    internal bool Forget(int account)
+    {
+        if (!Accounts.Remove(account, out var window)) return false;
+        forgotten.Add(Identity(window));
+        Restore(window);
+        ResetLayout();
+        return true;
     }
     internal void SaveCurrentPositions()
     {
@@ -239,6 +258,8 @@ internal sealed class WindowManager : IDisposable
         Native.SetWindowPos(window.Handle, 0, 0, 0, 0, 0, Native.NoActivate | Native.NoZOrder | Native.FrameChanged | 0x1 | 0x2);
         var placement = window.OriginalPlacement;
         Native.SetWindowPlacement(window.Handle, ref placement);
+        if (((long)window.OriginalStyle & 0x10000000) != 0 && !Native.IsWindowVisible(window.Handle))
+            Native.ShowWindow(window.Handle, placement.ShowCmd == 2 ? 7 : placement.ShowCmd == 3 ? 3 : 8);
     }
     public void Dispose() { foreach (var window in Accounts.Values) Restore(window); Accounts.Clear(); }
 }

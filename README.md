@@ -32,6 +32,13 @@ for windows appearing under a stationary pointer.
 Right-click the tray icon (possibly under Windows' hidden-icons arrow) to:
 
 - Switch between **5-man** and **10-man**.
+- **Catch / assign WoW window → Slot N → window** assigns any running WoW client
+  to that slot and its F-key. The newest client appears first and is labelled
+  **Newest**; entries also show their PID and whether they are assigned, unassigned,
+  or forgotten. Assignment returns windows to their numbered positions (main = 1).
+- **Forget WoW window → Slot N** releases that client and restores its original
+  borders and position. It no longer participates in layouts, hotkeys, or mouse
+  focus and stays excluded from auto-capture until explicitly caught again.
 - Toggle mouse focus; **Ctrl+Shift+F** also toggles it while WoW is active.
 - Pause the app, or reapply the layout with account 1 as main.
 - Save current window positions after manually moving/resizing game windows.
@@ -52,6 +59,13 @@ number; use the assignment controls if launch order is ambiguous. Assignments
 are retained for the lifetime of the app; they are not saved as account identities
 between sessions. Switching to 5-man restores extra clients and excludes them
 from focus/hotkeys. Switching back reuses their account numbers.
+
+If a client crashes, open a replacement and use **Catch / assign WoW window** to
+choose its number. Auto-capture usually fills the empty number automatically;
+manual assignment corrects it if needed. Catching an outside window into an
+occupied slot releases and forgets the displaced client. Choosing a client already
+assigned elsewhere exchanges the assignments. Forgotten-window exclusions last
+for this app session; restarting the app enables normal auto-capture again.
 
 ## Name and configuration
 

@@ -162,9 +162,54 @@ internal static class SelfTest
             Check(!manager.Accounts.ContainsKey(2) && manager.Accounts[3].Pid == three.Id, "Client exit leaves a stable empty account slot");
             var replacement = StartClient(2); eligible.Add(replacement.Id); manager.Rescan();
             Check(manager.Accounts[2].Pid == replacement.Id, "Restarted client reclaims the empty account number");
+            var forgottenClient = manager.Accounts[2];
+            var beforeForgetPlacement = forgottenClient.OriginalPlacement;
+            Check(manager.Forget(2), "Forget releases the chosen account");
+            Pump();
+            var releasedPlacement = new Native.Placement { Length = System.Runtime.InteropServices.Marshal.SizeOf<Native.Placement>() };
+            Native.GetWindowPlacement(forgottenClient.Handle, ref releasedPlacement);
+            Check(Native.GetWindowLongPtr(forgottenClient.Handle, Native.GwlStyle) == forgottenClient.OriginalStyle && releasedPlacement.Normal.Rectangle == beforeForgetPlacement.Normal.Rectangle, $"Forget restores original borders and placement (style {Native.GetWindowLongPtr(forgottenClient.Handle, Native.GwlStyle):X}/{forgottenClient.OriginalStyle:X}; show {releasedPlacement.ShowCmd}/{beforeForgetPlacement.ShowCmd}; bounds {releasedPlacement.Normal.Rectangle}/{beforeForgetPlacement.Normal.Rectangle})");
+            manager.Rescan(); manager.Rescan();
+            Check(!manager.Accounts.ContainsKey(2) && !manager.IsManaged(forgottenClient.Handle) && manager.IsForgotten(forgottenClient), "Repeated rescans never recapture a forgotten window");
+            manager.Assign(4, forgottenClient.Handle); Pump();
+            Check(manager.Accounts[4].Pid == replacement.Id && !manager.IsForgotten(forgottenClient), "Catch a forgotten window into an explicitly chosen slot");
+            Native.GetWindowRect(forgottenClient.Handle, out var caughtBounds);
+            Check(caughtBounds.Rectangle == manager.Settings.Current.Slots[3].Bounds, "Caught window occupies the requested physical slot");
+            manager.Rescan();
+            Check(!manager.Accounts.ContainsKey(2) && manager.Accounts[4].Pid == replacement.Id, "Numbered old title does not override manual slot choice");
+            manager.Assign(2, forgottenClient.Handle); Pump();
+            Check(manager.Accounts[2].Pid == replacement.Id && !manager.Accounts.ContainsKey(4), "Reassign an existing client into an empty slot");
+            var rejectedAssignment = false;
+            try { manager.Assign(6, forgottenClient.Handle); } catch (ArgumentOutOfRangeException) { rejectedAssignment = true; }
+            Check(rejectedAssignment && manager.Accounts[2].Pid == replacement.Id, "5-man rejects invalid target slots without changing assignments");
             for (var i = 4; i <= 10; i++) eligible.Add(StartClient(i).Id);
             manager.SwitchProfile("10-man"); Pump();
             Check(manager.Accounts.Count == 10, "Switch to 10-man discovers all ten clients");
+            var extra = StartClient(11); eligible.Add(extra.Id);
+            var originalTen = manager.Accounts[10];
+            using (var assignmentMenu = new ContextMenuStrip())
+            {
+                WindowMenus.AddTo(assignmentMenu, manager, action => action());
+                var catcher = (ToolStripMenuItem)assignmentMenu.Items[0];
+                Check(catcher.DropDownItems.OfType<ToolStripMenuItem>().Count(item => item.Text?.StartsWith("Slot ", StringComparison.Ordinal) == true) == 10, "Catch menu exposes all ten slots");
+                var slotTen = (ToolStripMenuItem)catcher.DropDownItems[9];
+                var extraWindow = manager.Discover().Single(w => w.Pid == extra.Id);
+                var catchChoice = slotTen.DropDownItems.OfType<ToolStripMenuItem>().Single(item => item.Tag is nint handle && handle == extraWindow.Handle);
+                catchChoice.PerformClick(); Pump();
+                Check(manager.Accounts[10].Pid == extra.Id && manager.IsForgotten(originalTen), "Tray catch replaces occupied slot 10 and excludes displaced client");
+                manager.Forget(10); manager.Rescan();
+                Check(!manager.Accounts.ContainsKey(10), "Forgotten replacement and displaced client both stay outside auto-capture");
+                var forgetter = (ToolStripMenuItem)assignmentMenu.Items[1];
+                forgetter.DropDownItems.OfType<ToolStripMenuItem>().First().PerformClick();
+                Check(!manager.Accounts.ContainsKey(1), "Tray forget action releases its numbered account");
+                manager.Assign(1, first);
+                manager.Assign(10, originalTen.Handle); Pump();
+                catchChoice = slotTen.DropDownItems.OfType<ToolStripMenuItem>().Single(item => item.Tag is nint handle && handle == extraWindow.Handle);
+                extra.CloseMainWindow(); extra.WaitForExit(5000); Pump();
+                var staleRejected = false;
+                try { catchChoice.PerformClick(); } catch (InvalidOperationException) { staleRejected = true; }
+                Check(staleRejected && manager.Accounts[10].Pid == originalTen.Pid, "Closed tray candidate is rejected without disturbing the current client");
+            }
             manager.Swap(10); Pump(); AssertLayout(10);
             manager.ResetLayout(); manager.SaveCurrentPositions();
             Check(manager.Settings.Current.Slots[0].Width == 165, "Save current window positions reads native bounds");

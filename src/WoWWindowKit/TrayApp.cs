@@ -46,7 +46,8 @@ internal sealed class TrayApp : ApplicationContext
         });
         manager.Changed = UpdateTray;
         tray.DoubleClick += (_, _) => ShowSettings();
-        menu.Opening += (_, _) => BuildMenu();
+        menu.Opening += (_, _) => { manager.Editing = true; Safe(BuildMenu); };
+        menu.Closed += (_, _) => { if (editor == null) manager.Editing = false; };
         commands.Command = command => dispatcher.BeginInvoke(() => Safe(() =>
         {
             if (command == -1) { ExitThread(); return; }
@@ -77,6 +78,8 @@ internal sealed class TrayApp : ApplicationContext
             var item = new ToolStripMenuItem(name) { Checked = manager.Settings.ActiveProfile == name };
             item.Click += (_, _) => Safe(() => SetProfile(name)); menu.Items.Add(item);
         }
+        menu.Items.Add(new ToolStripSeparator());
+        WindowMenus.AddTo(menu, manager, Safe, editor == null);
         menu.Items.Add(new ToolStripSeparator());
         var mouse = new ToolStripMenuItem("Focus follows mouse  (Ctrl+Shift+F)") { Checked = manager.Settings.MouseFocus };
         mouse.Click += (_, _) => Safe(ToggleMouse); menu.Items.Add(mouse);
