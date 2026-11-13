@@ -1,7 +1,7 @@
-param([switch]$Portable)
+param([switch]$Portable, [string]$OutputDirectory)
 $ErrorActionPreference = 'Stop'
 $project = Join-Path $PSScriptRoot 'src\WoWWindowKit\WoWWindowKit.csproj'
-$output = Join-Path $PSScriptRoot 'dist'
+$output = if ($OutputDirectory) { [IO.Path]::GetFullPath($OutputDirectory) } else { Join-Path $PSScriptRoot 'dist' }
 $arguments = @('publish', $project, '-c', 'Release', '-r', 'win-x64', '-o', $output, '--nologo', '-p:PublishSingleFile=true', '-p:IncludeNativeLibrariesForSelfExtract=true')
 if ($Portable) {
     $arguments += @('--self-contained', 'true', '-p:EnableCompressionInSingleFile=true')

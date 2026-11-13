@@ -53,6 +53,7 @@ internal static class Native
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] internal static extern uint RegisterWindowMessage(string name);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] internal static extern nint FindWindow(string? className, string title);
     [DllImport("user32.dll")] internal static extern bool PostMessage(nint window, uint message, nint wp, nint lp);
+    [DllImport("user32.dll")] internal static extern nint SendMessage(nint window, uint message, nint wp, nint lp);
     internal static string Title(nint window) { var text = new StringBuilder(1024); GetWindowText(window, text, text.Capacity); return text.ToString(); }
     internal static bool Down(int key) => GetAsyncKeyState(key) < 0;
     internal static nint RootAt(Point point) => GetAncestor(WindowFromPoint(point), 2);
@@ -74,9 +75,12 @@ internal static class Native
             if (attachedForeground) AttachThreadInput(thisThread, foregroundThread, false);
         }
     }
-    internal static void Position(nint window, Rectangle bounds)
+    internal static void Position(nint window, Rectangle bounds, bool frameChanged = true, bool asynchronous = false)
     {
-        if (!SetWindowPos(window, 0, bounds.X, bounds.Y, bounds.Width, bounds.Height, NoActivate | NoZOrder | FrameChanged))
+        var flags = NoActivate | NoZOrder | (frameChanged ? FrameChanged : 0u);
+        // Same async/deferred-erase/no-changing flags as WowOpenBox, plus no activation.
+        if (asynchronous) flags |= 0x6600;
+        if (!SetWindowPos(window, 0, bounds.X, bounds.Y, bounds.Width, bounds.Height, flags))
             throw new Win32Exception(Marshal.GetLastWin32Error(), "Could not reposition a game window. If WoW runs as administrator, run this app at the same level.");
     }
 }

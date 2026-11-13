@@ -33,6 +33,8 @@ internal static class SelfTest
     }
     internal static int Run()
     {
+        var liveApp = Mutex.TryOpenExisting(@"Local\WoWWindowKit.1C825122", out var liveMutex);
+        liveMutex?.Dispose();
         WindowManager? manager = null;
         var report = Path.Combine(AppContext.BaseDirectory, "self-test-results.txt");
         var temporary = Path.Combine(Path.GetTempPath(), "WoWWindowKit-test-" + Guid.NewGuid().ToString("N"));
@@ -65,6 +67,10 @@ internal static class SelfTest
             var one = StartClient(1); var two = StartClient(2); var three = StartClient(3);
             var eligible = new HashSet<int> { one.Id, two.Id, three.Id };
             manager = new WindowManager(imported, pid => eligible.Contains(pid));
+            // Live user button state must not make the mock-window assertions nondeterministic.
+            manager.MouseInputHeld = static () => false;
+            // Do not steal focus or move the pointer during the user's live session.
+            if (liveApp) manager.ActivateWindow = static _ => true;
             manager.Rescan(); Pump();
             Check(manager.Accounts.Count == 3 && manager.Accounts[2].Pid == two.Id, "Separate-process discovery and existing numbered titles");
             var originalHandle = manager.Accounts[2].Handle;
@@ -83,6 +89,14 @@ internal static class SelfTest
             Check(((long)Native.GetWindowLongPtr(manager.Accounts[1].Handle, Native.GwlStyle) & Native.BorderMask) == 0, "Borderless game window style applied");
             foreach (var main in new[] { 2, 3, 2, 1 }) { manager.Swap(main); Pump(); AssertLayout(main); }
             Check(manager.Accounts[2].Handle == originalHandle, "F-key account identity survives repeated swaps");
+            // These counters live in the separate mock-client processes, not the manager.
+            foreach (var client in manager.Accounts.Values) Native.SendMessage(client.Handle, TestClientForm.CounterMessage, 2, 0);
+            manager.Swap(2); Pump();
+            Check(Native.SendMessage(manager.Accounts[3].Handle, TestClientForm.CounterMessage, 0, 0) == 0, "Swap leaves unrelated client's native position untouched");
+            Check(manager.Accounts.Values.All(w => Native.SendMessage(w.Handle, TestClientForm.CounterMessage, 1, 0) == 0), "Swaps do not rewrite any client's window style");
+            foreach (var main in new[] { 3, 1, 2, 3, 2, 1 }) manager.Swap(main);
+            Pump(200); AssertLayout(1);
+            Check(manager.MainAccount == 1, "Rapid async swaps preserve the final logical layout");
             Check(!manager.Swap(5), "Missing account swap does nothing");
             manager.Paused = true; Check(!manager.Swap(2), "Pause blocks swaps"); manager.Paused = false;
             var swapCalled = 0; var toggled = 0;
@@ -100,32 +114,47 @@ internal static class SelfTest
             var point = new Native.Point(imported.Current.Slots[0].X + 20, imported.Current.Slots[0].Y + 20);
             Native.SetWindowPos(first, -1, 0, 0, 0, 0, Native.NoActivate | 0x1 | 0x2); Pump();
             Check(manager.HoverTarget(point) == first, "Exposed managed window qualifies for hover focus");
+            var realPointer = manager.ReadPointer;
+            var simulatedPointer = point;
+            manager.ReadPointer = () => simulatedPointer;
+            manager.Swap(2); Pump(); manager.MouseTick();
+            Check(manager.MouseDecision == "Stationary after swap", "Stationary pointer does not undo a keyboard swap");
+            var movement = Stopwatch.StartNew();
+            simulatedPointer.X++; manager.MouseTick();
+            Check(manager.MouseDecision != "Stationary after swap" && manager.MouseDecision != "Paused", "First mouse movement resumes hover without a 350 ms delay");
+            results.Add($"INFO: First movement handled after {movement.Elapsed.TotalMilliseconds:F2} ms (mock windows).");
+            manager.ResetLayout(); Pump();
             Native.SetWindowPos(first, -2, 0, 0, 0, 0, Native.NoActivate | 0x1 | 0x2);
             using (var blocker = new Form { Text = "Non-game overlap", StartPosition = FormStartPosition.Manual, Bounds = imported.Current.Slots[0].Bounds, TopMost = true, ShowInTaskbar = false })
             {
                 blocker.Show(); blocker.Activate();
                 Native.SetWindowPos(blocker.Handle, -1, point.X - 20, point.Y - 20, 165, 150, 0); Pump();
                 Check(manager.HoverTarget(point) == 0, "Overlapping non-game window blocks focus even inside WoW rectangle");
-                Native.SetCursorPos(point.X, point.Y); Pump(400);
+                simulatedPointer = point;
+                if (!liveApp) Native.SetCursorPos(point.X, point.Y);
+                Pump(100);
                 var foreground = Native.GetForegroundWindow();
                 manager.MouseTick();
-                Check(Native.GetForegroundWindow() == foreground, "Mouse focus does not steal focus outside WoW");
+                if (!liveApp) Check(Native.GetForegroundWindow() == foreground, "Mouse focus does not steal focus outside WoW");
+                else results.Add("SKIP: Foreground assertions while the user's app is running; simulated focus does not interrupt live clients.");
                 Native.SetWindowPos(blocker.Handle, -1, working.Right - 250, working.Bottom - 180, 165, 150, 0);
                 Native.SetWindowPos(first, -1, 0, 0, 0, 0, Native.NoActivate | 0x1 | 0x2);
                 Pump(400);
                 var focusDeadline = Environment.TickCount64 + 1500;
-                do { manager.MouseTick(); Pump(50); } while (Native.GetForegroundWindow() != first && Environment.TickCount64 < focusDeadline);
+                do { manager.MouseTick(); Pump(50); } while (!liveApp && Native.GetForegroundWindow() != first && Environment.TickCount64 < focusDeadline);
                 Native.GetCursorPos(out var observed);
-                if (Native.GetForegroundWindow() != first)
+                if (!liveApp && Native.GetForegroundWindow() != first)
                     throw new InvalidOperationException($"Focus resume failed: {manager.MouseDecision}; expected={first}; hover={manager.HoverTarget(observed)}; {manager.Status}; foreground={Native.Title(Native.GetForegroundWindow())}");
-                Check(true, "Returning pointer to exposed WoW resumes actual cross-process focus");
+                if (!liveApp) Check(true, "Returning pointer to exposed WoW resumes actual cross-process focus");
                 var second = manager.Accounts[2].Handle;
                 Native.SetWindowPos(second, -1, 0, 0, 0, 0, Native.NoActivate | 0x1 | 0x2);
                 var secondSlot = imported.Current.Slots[1];
-                Native.SetCursorPos(secondSlot.X + 20, secondSlot.Y + 20); Pump();
+                simulatedPointer = new Native.Point(secondSlot.X + 20, secondSlot.Y + 20);
+                if (!liveApp) Native.SetCursorPos(secondSlot.X + 20, secondSlot.Y + 20);
+                Pump();
                 focusDeadline = Environment.TickCount64 + 1500;
-                do { manager.MouseTick(); Pump(50); } while (Native.GetForegroundWindow() != second && Environment.TickCount64 < focusDeadline);
-                Check(Native.GetForegroundWindow() == second, "Mouse hover transfers actual focus between client processes");
+                do { manager.MouseTick(); Pump(50); } while (!liveApp && Native.GetForegroundWindow() != second && Environment.TickCount64 < focusDeadline);
+                if (!liveApp) Check(Native.GetForegroundWindow() == second, "Mouse hover transfers actual focus between client processes");
                 Native.SetWindowPos(second, -2, 0, 0, 0, 0, Native.NoActivate | 0x1 | 0x2);
             }
             Native.SetWindowPos(first, -2, 0, 0, 0, 0, Native.NoActivate | 0x1 | 0x2);
@@ -163,18 +192,30 @@ internal static class SelfTest
             // Install the actual low-level hook too; key routing above is exercised without synthetic input.
             using (var actualHook = new KeyboardHook(manager, _ => { }, () => { }))
                 Check(true, "Native keyboard hook installs and disposes");
+            var mouseEvents = 0;
+            using (var mouseHook = new MouseHook(() => mouseEvents++))
+            {
+                Check(true, "Native mouse hook installs and disposes");
+                if (!liveApp)
+                {
+                    Native.GetCursorPos(out var beforeMove);
+                    Native.SetCursorPos(beforeMove.X + 2, beforeMove.Y); Pump();
+                    Check(mouseEvents > 0, "Native mouse movement hook delivers events without polling");
+                }
+                else results.Add("SKIP: Synthetic pointer movement while user's app is running.");
+            }
             manager.Dispose(); manager = null; Pump();
             Check(Native.GetWindowLongPtr(first, Native.GwlStyle) == originalStyle, "Exit restores original window style");
             var restored = new Native.Placement { Length = System.Runtime.InteropServices.Marshal.SizeOf<Native.Placement>() };
             Native.GetWindowPlacement(first, ref restored);
             Check(restored.Normal.Rectangle == initialPlacement.Normal.Rectangle, "Exit restores original window placement");
-            results.Add($"SUCCESS: {results.Count} checks passed.");
+            results.Add($"SUCCESS: {results.Count(r => r.StartsWith("PASS:"))} checks passed; {results.Count(r => r.StartsWith("SKIP:"))} test groups skipped.");
             File.WriteAllLines(report, results); return 0;
         }
         catch (Exception ex) { results.Add(ex.ToString()); File.WriteAllLines(report, results); return 1; }
         finally
         {
-            Native.SetCursorPos(originalCursor.X, originalCursor.Y);
+            if (!liveApp) Native.SetCursorPos(originalCursor.X, originalCursor.Y);
             manager?.Dispose();
             foreach (var child in children)
             {
@@ -187,5 +228,23 @@ internal static class SelfTest
             if (resolvedScratch.StartsWith(scratchRoot, StringComparison.OrdinalIgnoreCase) && resolvedScratch.Length == scratchRoot.Length + 32)
                 Directory.Delete(resolvedScratch, true);
         }
+    }
+}
+
+internal sealed class TestClientForm : Form
+{
+    internal const uint CounterMessage = 0x8141;
+    private int positionChanges, styleChanges;
+    protected override void WndProc(ref Message message)
+    {
+        if ((uint)message.Msg == CounterMessage)
+        {
+            if ((int)message.WParam == 2) { positionChanges = styleChanges = 0; message.Result = 0; }
+            else message.Result = (int)message.WParam == 0 ? positionChanges : styleChanges;
+            return;
+        }
+        if (message.Msg == 0x47) positionChanges++;
+        if (message.Msg == 0x7D) styleChanges++;
+        base.WndProc(ref message);
     }
 }

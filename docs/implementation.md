@@ -59,6 +59,36 @@ game clients were available during initial implementation.
 
 ## Verification and risk calibration
 
+### Responsiveness follow-up
+
+Observed by user: swaps and hover focus feel slower than WowOpenBox.
+[evidence: ApplyLayout, Swap, MouseTick, TrayApp timer; upstream MoveAndResize]
+The first implementation synchronously reset every client's frame on every swap,
+polled for mouse transitions at 50 ms, and suppressed hover focus for 350 ms.
+Upstream skips unchanged geometry and uses asynchronous SetWindowPos (0x6604).
+
+PM-3 — Medium — Fast swaps race with pending moves, or mouse events undo hotkeys.
+[inference] Asynchronous geometry can still reflect the previous layout, so using
+GetWindowRect alone to decide which swap moves to skip can lose a rapid second
+swap. Use the logical previous/new slot mapping to select affected accounts;
+always enqueue their new positions, preserve per-client order, and test rapid
+swaps without waiting between requests. Keep style changes out of the swap path.
+Replace timed mouse suppression with a stationary-pointer guard cleared by the
+first actual movement. Observe mouse events without swallowing them; coalesce UI
+work so hooks remain short. Keep outside-game checks and the periodic fallback.
+Verdict: PROCEED WITH GUARDRAILS. PM-1/PM-2 remain invariants; PM-3 requires targeted
+native-window regression tests before deploying the rebuilt executable.
+
+Resolution: Mitigated in v1.0.1. The published candidate passed 66 checks,
+including native message counters confirming unchanged clients receive no swap
+position/style changes, and rapid queued swaps reach the correct final layout.
+The pointer guard is tested with deterministic input. Two test groups (native
+foreground assertions and synthetic cursor movement) were explicitly skipped
+because the user's tray app and five real clients were active; input hooks install
+successfully. Full foreground/input checks remain available with the tray app
+closed. The existing session was left running; v1.0.1 replaces the next-launch
+executable and the running v1.0.0 image is retained as a backup.
+
 - Release build: zero warnings and errors; no third-party packages.
 - 60 integration checks passed against the published executable, using separate
   mock-client processes. Includes repeated swaps, ten-account layout, restart,

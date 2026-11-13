@@ -24,7 +24,10 @@ internal sealed class WindowManager : IDisposable
     internal string Status { get; private set; } = "Waiting for WoW windows";
     internal string MouseDecision { get; private set; } = "Idle";
     internal Action? Changed;
-    private long suppressMouseUntil;
+    internal Func<Native.Point?> ReadPointer = static () => Native.GetCursorPos(out var point) ? point : null;
+    internal Func<bool> MouseInputHeld = static () => Native.Down(1) || Native.Down(2) || Native.Down(4) || Native.Down(5) || Native.Down(6);
+    internal Func<nint, bool> ActivateWindow = Native.Activate;
+    private Native.Point? mouseAtSwap;
     private nint lastHover;
     private long retryFocusAfter;
     private readonly Func<int, bool>? testProcess;
@@ -44,7 +47,8 @@ internal sealed class WindowManager : IDisposable
                 try
                 {
                     using var process = Process.GetProcessById(pid);
-                    info = (testProcess?.Invoke(pid) ?? Settings.ProcessNames.Contains(process.ProcessName, StringComparer.OrdinalIgnoreCase), process.StartTime.ToUniversalTime().Ticks);
+                    var eligible = testProcess?.Invoke(pid) ?? Settings.ProcessNames.Contains(process.ProcessName, StringComparer.OrdinalIgnoreCase);
+                    info = (eligible, eligible ? process.StartTime.ToUniversalTime().Ticks : 0);
                 }
                 catch { info = (false, 0); }
                 processes[pid] = info;
@@ -108,7 +112,7 @@ internal sealed class WindowManager : IDisposable
         var root = Native.RootAt(point);
         return IsManaged(root) ? root : 0;
     }
-    internal void ApplyLayout(int? main = null)
+    internal void ApplyLayout(int? main = null, bool swapOnly = false)
     {
         var targetMain = main ?? MainAccount;
         var rollback = new List<(ManagedWindow Window, nint Style, Rectangle Bounds)>();
@@ -118,14 +122,20 @@ internal sealed class WindowManager : IDisposable
             {
                 var window = pair.Value;
                 if (!window.Valid) continue;
+                if (swapOnly && (pair.Key > Settings.Current.Slots.Count || SlotFor(pair.Key, MainAccount) == SlotFor(pair.Key, targetMain))) continue;
                 if (pair.Key > Settings.Current.Slots.Count) { Restore(window); continue; }
                 var slot = SlotFor(pair.Key, targetMain);
                 if (slot < 1 || slot > Settings.Current.Slots.Count) continue;
                 Native.GetWindowRect(window.Handle, out var before);
                 rollback.Add((window, Native.GetWindowLongPtr(window.Handle, Native.GwlStyle), before.Rectangle));
-                Native.SetWindowLongPtr(window.Handle, Native.GwlStyle, Settings.Borderless ? (nint)((long)window.OriginalStyle & ~Native.BorderMask) : window.OriginalStyle);
+                var style = Native.GetWindowLongPtr(window.Handle, Native.GwlStyle);
+                var desiredStyle = Settings.Borderless ? (nint)((long)window.OriginalStyle & ~Native.BorderMask) : window.OriginalStyle;
+                var styleChanged = !swapOnly && style != desiredStyle;
+                if (styleChanged) Native.SetWindowLongPtr(window.Handle, Native.GwlStyle, desiredStyle);
                 if (Native.IsIconic(window.Handle)) Native.ShowWindow(window.Handle, 4); // show without activation
-                Native.Position(window.Handle, Settings.Current.Slots[slot - 1].Bounds);
+                var bounds = Settings.Current.Slots[slot - 1].Bounds;
+                if (swapOnly || styleChanged || before.Rectangle != bounds)
+                    Native.Position(window.Handle, bounds, styleChanged, asynchronous: swapOnly);
             }
             MainAccount = targetMain;
             Status = $"{Accounts.Count(p => p.Key <= Settings.Current.Slots.Count)} / {Settings.Current.Slots.Count} accounts · {Settings.ActiveProfile}";
@@ -143,10 +153,10 @@ internal sealed class WindowManager : IDisposable
     internal bool Swap(int account)
     {
         if (Paused || Editing || account < 1 || account > Settings.Current.Slots.Count || !Accounts.TryGetValue(account, out var window) || !window.Valid) return false;
-        ApplyLayout(account);
-        suppressMouseUntil = Environment.TickCount64 + 350;
+        mouseAtSwap = ReadPointer();
         lastHover = 0;
         Activate(window.Handle);
+        ApplyLayout(account, swapOnly: true);
         Changed?.Invoke();
         return true;
     }
@@ -191,23 +201,25 @@ internal sealed class WindowManager : IDisposable
     }
     internal void MouseTick()
     {
-        if (Paused || Editing || !Settings.MouseFocus || Environment.TickCount64 < suppressMouseUntil) { MouseDecision = "Paused"; return; }
-        // Never change focus while a user is dragging, holding a game modifier, or in a menu.
-        if (new[] { 1, 2, 4, 5, 6, 16, 17, 18, 91, 92 }.Any(Native.Down)) { MouseDecision = "Held input"; return; }
-        if (!Native.GetCursorPos(out var point)) { MouseDecision = "No cursor"; return; }
+        if (Paused || Editing || !Settings.MouseFocus) { MouseDecision = "Paused"; return; }
+        // Do not transfer a held mouse button to another game window mid-drag.
+        if (MouseInputHeld()) { MouseDecision = "Held input"; return; }
+        if (ReadPointer() is not { } point) { MouseDecision = "No cursor"; return; }
+        if (mouseAtSwap is { } anchor && point.X == anchor.X && point.Y == anchor.Y) { MouseDecision = "Stationary after swap"; return; }
+        mouseAtSwap = null;
         var target = HoverTarget(point);
         if (target == 0) { MouseDecision = "Outside"; lastHover = 0; return; }
         if (Native.GetForegroundWindow() == target) { ClearFocusFailure(); MouseDecision = "Already focused"; lastHover = target; return; }
         if (target == lastHover && Environment.TickCount64 < retryFocusAfter) { MouseDecision = "Throttled"; return; }
         MouseDecision = $"Activating {target}";
         lastHover = target;
-        retryFocusAfter = Environment.TickCount64 + 150;
+        retryFocusAfter = Environment.TickCount64 + 25;
         Activate(target);
     }
     private void Activate(nint target)
     {
         if (Native.GetForegroundWindow() == target) return;
-        if (!Native.Activate(target))
+        if (!ActivateWindow(target))
         {
             Status = "Windows refused focus — click a WoW window once, then retry";
             Changed?.Invoke();

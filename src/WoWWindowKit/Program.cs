@@ -14,7 +14,7 @@ internal static class Program
         if (args.Contains("--test-client"))
         {
             var number = int.Parse(Option(args, "--test-client")!);
-            using var client = new Form { Text = $"WoW {number}", StartPosition = FormStartPosition.Manual, Bounds = new Rectangle(80 + number * 8, 80 + number * 8, 280, 180) };
+            using var client = new TestClientForm { Text = $"WoW {number}", StartPosition = FormStartPosition.Manual, Bounds = new Rectangle(80 + number * 8, 80 + number * 8, 280, 180) };
             Application.Run(client); return 0;
         }
         if (args.Contains("--self-test")) return SelfTest.Run();

@@ -21,6 +21,8 @@ internal sealed class TrayApp : ApplicationContext
     private readonly ContextMenuStrip menu = new();
     private readonly System.Windows.Forms.Timer timer = new();
     private readonly KeyboardHook keyboard;
+    private readonly MouseHook mouse;
+    private bool mousePending;
     private readonly ControlWindow commands = new();
     private readonly Control dispatcher = new();
     private SettingsForm? editor;
@@ -36,6 +38,12 @@ internal sealed class TrayApp : ApplicationContext
         keyboard = new KeyboardHook(manager,
             account => dispatcher.BeginInvoke(() => Safe(() => manager.Swap(account))),
             () => dispatcher.BeginInvoke(() => Safe(ToggleMouse)));
+        mouse = new MouseHook(() =>
+        {
+            if (disposed || mousePending) return;
+            mousePending = true;
+            dispatcher.BeginInvoke(() => { mousePending = false; if (!disposed) Safe(manager.MouseTick); });
+        });
         manager.Changed = UpdateTray;
         tray.DoubleClick += (_, _) => ShowSettings();
         menu.Opening += (_, _) => BuildMenu();
@@ -48,12 +56,12 @@ internal sealed class TrayApp : ApplicationContext
         timer.Interval = settings.MousePollMs;
         timer.Tick += (_, _) => Safe(() =>
         {
+            manager.MouseTick();
             if (Environment.TickCount64 >= nextScan)
             {
                 nextScan = Environment.TickCount64 + 1000;
                 if (!manager.Paused) manager.Rescan();
             }
-            manager.MouseTick();
         });
         UpdateTray(); Safe(manager.Rescan); timer.Start();
     }
@@ -135,7 +143,7 @@ internal sealed class TrayApp : ApplicationContext
     {
         if (!disposed)
         {
-            disposed = true; editor?.Close(); timer.Stop(); keyboard.Dispose(); manager.Dispose();
+            disposed = true; editor?.Close(); timer.Stop(); keyboard.Dispose(); mouse.Dispose(); manager.Dispose();
             tray.Visible = false; tray.Dispose(); timer.Dispose(); menu.Dispose(); commands.Dispose(); dispatcher.Dispose();
         }
         base.ExitThreadCore();

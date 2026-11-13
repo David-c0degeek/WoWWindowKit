@@ -24,8 +24,10 @@ Move the mouse over a managed WoW window to focus it. Move over another app,
 the desktop, or an app covering WoW and this app stops changing focus. It resumes
 when you return to an exposed managed game window. There is no mouse movement,
 click injection, input broadcasting, or gameplay automation. Focus pauses while
-holding a mouse button or modifier, during Settings editing, and for 350 ms after
-a swap so the mouse does not immediately undo the keyboard selection.
+holding a mouse button or editing Settings. After an F-key swap, a stationary
+pointer leaves the chosen account active; the first mouse movement resumes hover
+focus immediately. Mouse transitions are event-driven, with a periodic fallback
+for windows appearing under a stationary pointer.
 
 Right-click the tray icon (possibly under Windows' hidden-icons arrow) to:
 
@@ -95,6 +97,9 @@ window movement, repeated swaps, account identity, client restart, overlapping
 non-game windows, contextual hotkey dispatch, profile changes, settings validation,
 and style/placement restoration. They do not attach to real WoW processes.
 Real WoW focus behavior and game rendering after resize need a live-session check.
+When the tray app is already running, tests use simulated pointer/focus input and
+explicitly skip the foreground and synthetic pointer groups to avoid fighting
+the live session. Exit the tray app before testing to exercise those groups too.
 
 Source and imported layouts are independent of the original app installation.
 The original app, batch launchers, and settings are not modified. No upstream
