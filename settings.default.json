@@ -1,0 +1,129 @@
+{
+  "DisplayName": "Notepad++",
+  "ActiveProfile": "5-man",
+  "MouseFocus": true,
+  "Borderless": true,
+  "MousePollMs": 50,
+  "ProcessNames": [
+    "Wow",
+    "WowClassic",
+    "WowClassicT"
+  ],
+  "Profiles": [
+    {
+      "Name": "5-man",
+      "Slots": [
+        {
+          "X": 0,
+          "Y": 0,
+          "Width": 1880,
+          "Height": 1392,
+          "Hotkey": "F1"
+        },
+        {
+          "X": 1880,
+          "Y": 0,
+          "Width": 680,
+          "Height": 348,
+          "Hotkey": "F2"
+        },
+        {
+          "X": 1880,
+          "Y": 349,
+          "Width": 680,
+          "Height": 347,
+          "Hotkey": "F3"
+        },
+        {
+          "X": 1880,
+          "Y": 697,
+          "Width": 680,
+          "Height": 347,
+          "Hotkey": "F4"
+        },
+        {
+          "X": 1880,
+          "Y": 1045,
+          "Width": 680,
+          "Height": 347,
+          "Hotkey": "F5"
+        }
+      ]
+    },
+    {
+      "Name": "10-man",
+      "Slots": [
+        {
+          "X": 0,
+          "Y": 0,
+          "Width": 2048,
+          "Height": 1152,
+          "Hotkey": "F1"
+        },
+        {
+          "X": 2048,
+          "Y": 0,
+          "Width": 512,
+          "Height": 288,
+          "Hotkey": "F2"
+        },
+        {
+          "X": 2048,
+          "Y": 288,
+          "Width": 512,
+          "Height": 288,
+          "Hotkey": "F3"
+        },
+        {
+          "X": 2048,
+          "Y": 576,
+          "Width": 512,
+          "Height": 288,
+          "Hotkey": "F4"
+        },
+        {
+          "X": 2048,
+          "Y": 864,
+          "Width": 512,
+          "Height": 288,
+          "Hotkey": "F5"
+        },
+        {
+          "X": 0,
+          "Y": 1152,
+          "Width": 512,
+          "Height": 288,
+          "Hotkey": "F6"
+        },
+        {
+          "X": 512,
+          "Y": 1152,
+          "Width": 512,
+          "Height": 288,
+          "Hotkey": "F7"
+        },
+        {
+          "X": 1024,
+          "Y": 1152,
+          "Width": 512,
+          "Height": 288,
+          "Hotkey": "F8"
+        },
+        {
+          "X": 1536,
+          "Y": 1152,
+          "Width": 512,
+          "Height": 288,
+          "Hotkey": "F9"
+        },
+        {
+          "X": 2048,
+          "Y": 1152,
+          "Width": 512,
+          "Height": 288,
+          "Hotkey": "F10"
+        }
+      ]
+    }
+  ]
+}
