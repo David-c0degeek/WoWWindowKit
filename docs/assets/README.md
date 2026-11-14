@@ -4,6 +4,15 @@
 Generated with the built-in image generation tool. The main pane and four
 companion panes represent the utility's five-client layout.
 
+`logo.ico` contains 16, 24, 32, 48, 64, 128 and 256 pixel versions of that logo,
+centered on a transparent square. It is embedded in the Windows executable and
+used by the shortcuts, control window, Settings and tray icon. To regenerate it
+with Python and Pillow:
+
+```powershell
+python -c "from PIL import Image, ImageOps; im=Image.open('docs/assets/logo.png').convert('RGBA'); im=ImageOps.pad(im, (1312,1312), color=(0,0,0,0)); im.save('docs/assets/logo.ico', sizes=[(16,16),(24,24),(32,32),(48,48),(64,64),(128,128),(256,256)])"
+```
+
 ## Generation prompt
 
 ```text

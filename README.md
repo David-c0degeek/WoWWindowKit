@@ -70,6 +70,16 @@ cd WoWWindowKit
 The portable build includes the runtime. If you already have a built `dist` folder,
 start with the launchers below.
 
+**Install a shortcut:** double-click **Install shortcut.cmd** in the repository or
+the built `dist` folder. This adds **WoWWindowKit** to your Start menu and desktop
+with the project icon. Find it in Start, right-click it and choose **Pin to taskbar**.
+You can also right-click the desktop shortcut (under **Show more options** if needed).
+The shortcut opens controls with your last selected profile; it also reopens controls
+when the app is already in the tray. Run the installer again after moving the folder.
+Use `Install shortcut.cmd -NoDesktop` for Start only, or `Install shortcut.cmd -Remove`
+to remove both shortcuts. The app stays in its existing folder; no administrator access
+is needed. Pinning is the manual final step.
+
 1. **Close other window-management tools.** Tools that also control window
    layouts or mouse focus can compete with WoWWindowKit.
 2. **Choose your party size.** Run `Start 5-man.cmd` or `Start 10-man.cmd` in `dist`.

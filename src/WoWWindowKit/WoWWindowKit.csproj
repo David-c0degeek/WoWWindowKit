@@ -6,6 +6,7 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>../../docs/assets/logo.ico</ApplicationIcon>
     <Version>1.0.7</Version>
     <Company>David-c0degeek</Company>
     <Description>WoW layouts, main-window swapping, and mouse focus.</Description>

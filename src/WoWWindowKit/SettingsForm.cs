@@ -23,7 +23,7 @@ internal sealed class SettingsForm : Form
         this.manager = manager; this.save = save; draft = manager.Settings.Copy();
         Text = draft.DisplayName; Font = new Font("Segoe UI", 10); StartPosition = FormStartPosition.CenterScreen;
         MinimumSize = new Size(850, 740); Size = new Size(940, 820); AutoScaleMode = AutoScaleMode.Dpi;
-        Icon = SystemIcons.Application;
+        Icon = Program.AppIcon;
         var root = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(18), ColumnCount = 1, RowCount = 8 };
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));

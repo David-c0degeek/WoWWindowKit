@@ -22,7 +22,7 @@ internal sealed class ControlsForm : Form
         this.toggleMouse = toggleMouse; this.togglePause = togglePause;
         Text = manager.Settings.DisplayName; Font = new Font("Segoe UI", 10);
         StartPosition = FormStartPosition.CenterScreen; AutoScaleMode = AutoScaleMode.Dpi;
-        Size = new Size(660, 500); MinimumSize = new Size(600, 440); Icon = SystemIcons.Application;
+        Size = new Size(660, 500); MinimumSize = new Size(600, 440); Icon = Program.AppIcon;
         var root = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(14), ColumnCount = 1, RowCount = 7 };
         foreach (var height in new[] { 38, 28, 0, 27, 35, 39, 36 }) root.RowStyles.Add(height == 0 ? new RowStyle(SizeType.Percent, 100) : new RowStyle(SizeType.Absolute, height));
         Controls.Add(root);

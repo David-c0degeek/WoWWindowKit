@@ -2,6 +2,8 @@ namespace WoWWindowKit;
 
 internal static class Program
 {
+    internal static Icon AppIcon { get; } = Icon.ExtractAssociatedIcon(Application.ExecutablePath) ?? SystemIcons.Application;
+
     [STAThread]
     private static int Main(string[] args)
     {

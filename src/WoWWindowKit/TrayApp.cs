@@ -34,7 +34,7 @@ internal sealed class TrayApp : ApplicationContext
         manager = new WindowManager(settings);
         DarkTheme.Apply(menu);
         _ = dispatcher.Handle;
-        tray = new NotifyIcon { Icon = SystemIcons.Application, ContextMenuStrip = menu, Visible = true };
+        tray = new NotifyIcon { Icon = Program.AppIcon, ContextMenuStrip = menu, Visible = true };
         controls = new ControlsForm(manager, Safe, SetProfile, ToggleMouse, TogglePause, ShowSettings, ExitThread);
         focus = new FocusWorker(manager.MouseTick, settings.MousePollMs);
         tracking = new WindowTracking(Path.Combine(AppContext.BaseDirectory, "window-tracking.restore"));
