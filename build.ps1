@@ -16,4 +16,5 @@ foreach ($profile in @('5-man','10-man')) {
     [IO.File]::WriteAllLines((Join-Path $output "Start $profile.cmd"), $lines, [Text.Encoding]::ASCII)
 }
 [IO.File]::WriteAllLines((Join-Path $output 'Settings.cmd'), @('@echo off', 'cd /d "%~dp0"', 'start "" "%~dp0WoWWindowKit.exe" --settings'), [Text.Encoding]::ASCII)
+[IO.File]::WriteAllLines((Join-Path $output 'Controls.cmd'), @('@echo off', 'cd /d "%~dp0"', 'start "" "%~dp0WoWWindowKit.exe" --controls'), [Text.Encoding]::ASCII)
 Write-Host "Built in $output"

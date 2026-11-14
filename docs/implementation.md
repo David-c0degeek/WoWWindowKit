@@ -1,5 +1,24 @@
 # Implementation decisions and pre-mortem
 
+## Compact controls (v1.0.3)
+
+Add a dark modeless control window, visible by default: live account list, profile,
+mouse focus, pause, catch/assign, forget, make main, and access to layout settings.
+Closing hides it; the existing ApplicationContext owns the lifetime. The panel's
+visibility must not set Editing or pause game focus. Refresh labels from existing
+manager notifications/scan ticks without adding a second discovery loop. Changes
+use the same manager methods as the tray. Modal settings remain separate. Test
+hide/reopen without detachment, catch/forget callbacks, profile switching, and
+single-instance commands distinguishing Controls from Settings.
+
+Verification: 90 integration checks passed with no skipped groups; 9 packaged
+smoke checks cover default startup UI, hide/reopen via a second launch, profile
+switching, separate modal settings, rename support, and clean shutdown. Native
+screenshots verify the compact panel is dark throughout. Closing with external
+WM_CLOSE exposed a different CloseReason than the title-bar X; both now hide the
+panel consistently. The input-hook regression probe now uses test-only movement
+input under a real message loop rather than relying on SetCursorPos notifications.
+
 ## Catch / forget follow-up (v1.0.2)
 
 PM-4 — Medium — A forgotten window is immediately recaptured by the existing

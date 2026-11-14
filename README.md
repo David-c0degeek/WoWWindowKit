@@ -1,6 +1,6 @@
 # WoWWindowKit
 
-A small Windows tray app for David's WoW window layouts, account swapping, and
+A small Windows utility for David's WoW window layouts, account swapping, and
 focus following the mouse. The display name defaults to **Notepad++** and can be
 changed in Settings at any time.
 The interface is dark only, including layout controls, menus, and app dialogs.
@@ -15,6 +15,15 @@ The interface is dark only, including layout controls, menus, and app dialogs.
    order; existing `WoW 1` … `WoW 10` titles retain those numbers when possible.
 4. Press **F1–F5** or **F1–F10** while a managed WoW window is active to move that
    account into the large slot and activate it. Each account keeps its number.
+
+A compact dark **control window** opens on startup. It shows each slot, its swap
+key, the assigned client's PID/title, and which account is main. Select a row,
+choose a running window in the dropdown, then click **Catch / assign** or **Forget**.
+It also provides profile selection, mouse focus, pause/resume, make-main, refresh,
+layout settings, and Exit. Management continues while this window is visible.
+Closing it or choosing **Hide to tray** keeps the app running. Reopen it by
+double-clicking the tray icon, choosing **Show controls**, or running **Controls.cmd**.
+Use `--tray` on first launch to start hidden instead.
 
 Swapping matches your old setup: choosing account N puts N in the main slot,
 account 1 in slot N, and returns the previous main account to its own slot.
@@ -46,7 +55,7 @@ Right-click the tray icon (possibly under Windows' hidden-icons arrow) to:
   mode, and which game window belongs to each account.
 - Exit and restore the original window styles and positions.
 
-Double-click the tray icon or run **Settings.cmd** to open Settings. Layouts use
+Choose **Settings / layout** in the controls, or run **Settings.cmd**, to edit Settings. Layouts use
 physical desktop pixels and retain your original coordinates:
 
 | Profile | Main | Other windows |
@@ -71,7 +80,7 @@ for this app session; restarting the app enables normal auto-capture again.
 
 **App name** changes the Settings window title, tray label, and application dialog
 titles immediately on save. It does not change game titles. You can also rename
-`WoWWindowKit.exe` while it is closed; update the three `.cmd` files to the new
+`WoWWindowKit.exe` while it is closed; update the four `.cmd` files to the new
 filename. The app locates settings relative to its executable, independent of its
 filename. Windows Task Manager may display the executable or embedded product
 metadata separately from the chosen window title. No separate rename script is needed.

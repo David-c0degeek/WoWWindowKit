@@ -30,7 +30,7 @@ internal static class Program
                 if (existing != 0) break;
                 Thread.Sleep(50);
             } while (Environment.TickCount64 < deadline);
-            if (existing != 0) Native.PostMessage(existing, ControlWindow.CommandMessage, args.Contains("--exit") ? -1 : requestedProfile == "10-man" ? 10 : requestedProfile == "5-man" ? 5 : 0, 0);
+            if (existing != 0) Native.PostMessage(existing, ControlWindow.CommandMessage, args.Contains("--exit") ? -1 : args.Contains("--settings") ? 2 : requestedProfile == "10-man" ? 10 : requestedProfile == "5-man" ? 5 : 0, 0);
             else DarkTheme.Message(null, "The app is already starting. Use its tray icon to switch profiles.", "Notepad++");
             return 0;
         }
@@ -44,10 +44,10 @@ internal static class Program
             Application.ThreadException += (_, e) => { Log(e.Exception); DarkTheme.Message(null, e.Exception.Message, settings.DisplayName); };
             using var app = new TrayApp(settings);
             System.Windows.Forms.Timer? initial = null;
-            if (args.Contains("--settings"))
+            if (!args.Contains("--tray") || args.Contains("--settings"))
             {
                 initial = new System.Windows.Forms.Timer { Interval = 100 };
-                initial.Tick += (_, _) => { initial.Stop(); app.ShowSettings(); initial.Dispose(); }; initial.Start();
+                initial.Tick += (_, _) => { initial.Stop(); if (args.Contains("--settings")) app.ShowSettings(); else app.ShowControls(); initial.Dispose(); }; initial.Start();
             }
             Application.Run(app); return 0;
         }

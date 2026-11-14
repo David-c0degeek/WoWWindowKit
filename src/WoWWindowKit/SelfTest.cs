@@ -1,10 +1,21 @@
 using System.Diagnostics;
 using System.Text.Json;
+using System.Runtime.InteropServices;
 
 namespace WoWWindowKit;
 
 internal static class SelfTest
 {
+    [StructLayout(LayoutKind.Explicit, Size = 40)]
+    private struct TestMouseInput
+    {
+        [FieldOffset(0)] public uint Type;
+        [FieldOffset(8)] public int X;
+        [FieldOffset(12)] public int Y;
+        [FieldOffset(20)] public uint Flags;
+    }
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern uint SendInput(uint count, ref TestMouseInput input, int size);
     private static readonly List<string> results = [];
     private static readonly List<Process> children = [];
     private static void Check(bool condition, string name)
@@ -217,6 +228,38 @@ internal static class SelfTest
             Check(manager.Accounts[2].Pid == three.Id && manager.Accounts[3].Pid == replacement.Id, "Manual account assignment exchanges identities");
             manager.SwitchProfile("5-man"); Pump();
             Check(!manager.IsManaged(manager.Accounts[10].Handle), "5-man excludes extra clients from mouse focus and hotkeys");
+            ControlsForm? panel = null;
+            var exitClicks = 0;
+            using (panel = new ControlsForm(manager, action => action(),
+                name => { manager.SwitchProfile(name); panel?.RefreshState(); },
+                () => { manager.Settings.MouseFocus = !manager.Settings.MouseFocus; panel?.RefreshState(); },
+                () => { manager.Paused = !manager.Paused; panel?.RefreshState(); }, () => { }, () => exitClicks++))
+            {
+                panel.Show(); panel.RefreshWindows(); Pump();
+                var rows = (DataGridView)panel.Controls.Find("controlSlots", true).Single();
+                Check(rows.Rows.Count == 5 && !manager.Editing, "Compact controls show the live layout without pausing game management");
+                rows.CurrentCell = rows.Rows[2].Cells[0];
+                var assigned = manager.Accounts[3];
+                ((Button)panel.Controls.Find("controlForget", true).Single()).PerformClick();
+                Check(!manager.Accounts.ContainsKey(3) && manager.IsForgotten(assigned), "Control window Forget button releases the selected slot");
+                var choices = (ComboBox)panel.Controls.Find("controlWindows", true).Single();
+                choices.SelectedItem = choices.Items.Cast<object>().Single(c => c.ToString()!.Contains($"PID {assigned.Pid} ·", StringComparison.Ordinal));
+                ((Button)panel.Controls.Find("controlCatch", true).Single()).PerformClick();
+                Check(manager.Accounts[3].Handle == assigned.Handle, "Control window catches the chosen client back into the selected slot");
+                var picker = (ComboBox)panel.Controls.Find("controlProfile", true).Single();
+                picker.SelectedItem = "10-man";
+                Check(rows.Rows.Count == 10 && manager.Settings.ActiveProfile == "10-man", "Control window profile picker updates the live layout");
+                using var snapshot = new Bitmap(panel.Width, panel.Height);
+                panel.DrawToBitmap(snapshot, new Rectangle(Point.Empty, panel.Size));
+                snapshot.Save(Path.Combine(AppContext.BaseDirectory, "controls-preview.png"));
+                var count = manager.Accounts.Count;
+                panel.Close();
+                Check(!panel.IsDisposed && !panel.Visible && manager.Accounts.Count == count, "Closing compact controls hides them without detaching clients");
+                panel.Show(); Pump();
+                Check(panel.Visible && !panel.IsDisposed, "Hidden controls can reopen while management keeps running");
+                ((Button)panel.Controls.Find("controlExit", true).Single()).PerformClick();
+                Check(exitClicks == 1, "Control window Exit button invokes app shutdown");
+            }
             AppSettings? edited = null;
             using (var form = new SettingsForm(manager, settings => { edited = settings; manager.Settings = settings; }))
             {
@@ -243,8 +286,21 @@ internal static class SelfTest
                 Check(true, "Native mouse hook installs and disposes");
                 if (!liveApp)
                 {
-                    Native.GetCursorPos(out var beforeMove);
-                    Native.SetCursorPos(beforeMove.X + 2, beforeMove.Y); Pump();
+                    var delta = 3;
+                    var attempts = 0;
+                    // Exercise the hook under the real message loop used in production.
+                    // SetCursorPos is not a reliable low-level input event source. This
+                    // test-only movement sends no button/key input and restores the pointer.
+                    using var hookLoop = new ApplicationContext();
+                    using var pulse = new System.Windows.Forms.Timer { Interval = 20 };
+                    pulse.Tick += (_, _) =>
+                    {
+                        if (mouseEvents > 0 || attempts++ >= 30) { hookLoop.ExitThread(); return; }
+                        var input = new TestMouseInput { Type = 0, X = delta, Flags = 1 };
+                        SendInput(1, ref input, Marshal.SizeOf<TestMouseInput>());
+                        delta = -delta;
+                    };
+                    pulse.Start(); Application.Run(hookLoop); pulse.Stop();
                     Check(mouseEvents > 0, "Native mouse movement hook delivers events without polling");
                 }
                 else results.Add("SKIP: Synthetic pointer movement while user's app is running.");
