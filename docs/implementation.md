@@ -1,5 +1,49 @@
 # Implementation decisions and pre-mortem
 
+## Contain the automatic-layout regression (v1.0.8)
+
+User incident, 2026-11-14: after logging in all clients and quickly selecting
+F2, F3, F4, F5, windows repeatedly resized and moved. Commit c098696 added a
+250 ms enforcement loop with synchronous positioning and frame-style changes.
+The local dist/app.log at 23:11:30 records account 3 already at its exact target
+rectangle with style 0x14050000; enforcement still rewrote its frame. Subsequent
+entries show accounts 3 and 5 alternating between the intended rectangles and
+1827x1353 / 1841x1367 rectangles. Focus calls took more than six seconds.
+The loop participated in the incident; the game's reason for rejecting sizes
+and the precise causal ordering cannot be established from this log alone.
+
+Failed future: another automatic repair fights WoW's delayed window changes
+and makes rapid swaps unstable again. Removing enforcement contains that
+regression but leaves the original game-driven resize issue unresolved.
+
+- PM-5 — High — Polling fights the game. [evidence: c098696 EnforceLayout;
+  incident log above] Replace enforcement with observation only. Idle polling
+  must never position, restore, activate, or change the style of an existing
+  client. Detect with native position/style message counters after repeated
+  simulated game changes, including style-only drift at correct bounds.
+  Resolution: Prevented by removing all correction writes from the observer.
+- PM-6 — Medium — Mock success is mistaken for real-game acceptance.
+  [evidence: SelfTest's mock windows apply resizing promptly; incident above]
+  Preserve swap/account/focus tests, test repeated observation between rapid
+  swaps, and explicitly retain real-client acceptance as outstanding. Never
+  claim the original drift problem is solved by this containment build.
+  Resolution: Mitigated by focused regression checks and explicit limits.
+
+Guardrails: retain explicit layout/reapply and swap behavior; restore the
+one-second discovery timer; deduplicate passive drift logs. Preserve user
+settings and the failed binary/log before replacing the next-launch binary.
+Verdict: PROCEED WITH GUARDRAILS. Live WoW rapid F2–F5 acceptance remains required.
+
+Verification: Release build has zero warnings/errors. 156 integration checks
+passed with zero skipped groups, including five attached clients receiving rapid
+F2–F5 bindings, frame-only drift at correct bounds, repeated game-driven geometry
+changes, maximization, zero native position/style messages from repeated polling,
+and explicit Reapply layout. Nine packaged smoke checks passed. The first smoke
+run hit a sharing violation while polling settings during a save; the retry passed.
+Failed binary, settings and app.log were copied and SHA-256 verified under
+artifacts/incident-c098696-20261114-231848 before rebuilding dist as v1.0.8.
+No real WoW clients were running: PM-6's real-client acceptance remains outstanding.
+
 ## Swap keeps focus on the new main (v1.0.7)
 
 Observed by user: pressing F5 to make the hunter main left focus on the old main,

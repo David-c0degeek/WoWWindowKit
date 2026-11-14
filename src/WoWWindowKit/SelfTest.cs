@@ -118,43 +118,50 @@ internal static class SelfTest
             Pump(200); AssertLayout(1);
             Check(manager.MainAccount == 1, "Rapid async swaps preserve the final logical layout");
             {
-                // Real WoW can re-add its resize frame and choose its own windowed size after a swap.
+                // Incident: WoW re-adds frame bits even at correct bounds. Polling must not
+                // rewrite that style and trigger another game-driven resize.
                 var settle = Environment.TickCount64 + 2000;
                 while (manager.LayoutSettling() && Environment.TickCount64 < settle) Pump(20);
                 var drifting = manager.Accounts[2].Handle;
-                void GameResizesItself()
+                void GameChangesItself(Rectangle bounds)
                 {
                     var current = (long)Native.GetWindowLongPtr(drifting, Native.GwlStyle);
                     Native.SetWindowLongPtr(drifting, Native.GwlStyle, (nint)(current | 0x00050000)); // WS_THICKFRAME | WS_MAXIMIZEBOX
-                    Native.SetWindowPos(drifting, 0, 10, 10, 400, 300, Native.NoActivate | Native.NoZOrder | Native.FrameChanged);
+                    Native.Position(drifting, bounds);
                     Pump();
                 }
-                bool Framed() => ((long)Native.GetWindowLongPtr(drifting, Native.GwlStyle) & Native.BorderMask) != 0;
-                GameResizesItself();
-                manager.EnforceLayout(); Pump(); AssertLayout(1);
-                Check(!Framed(), "A client that re-adds its frame and resizes itself is put back, borderless, in its slot");
-                GameResizesItself();
-                manager.Paused = true; manager.EnforceLayout(); Pump();
-                Check(Framed() && manager.ReadBounds(drifting) == new Rectangle(10, 10, 400, 300), "Pause leaves hand-moved windows alone");
-                manager.Paused = false;
-                var held = manager.MouseInputHeld; manager.MouseInputHeld = static () => true;
-                manager.EnforceLayout(); Pump();
-                Check(Framed(), "A held mouse button (dragging a window) defers layout correction");
-                manager.MouseInputHeld = held;
-                manager.EnforceLayout(); Pump(); AssertLayout(1);
+                void AssertObservationDoesNotWrite(string scenario)
+                {
+                    var before = manager.ReadBounds(drifting);
+                    var style = Native.GetWindowLongPtr(drifting, Native.GwlStyle);
+                    var foreground = Native.GetForegroundWindow();
+                    var zoomed = Native.IsZoomed(drifting);
+                    Native.SendMessage(drifting, TestClientForm.CounterMessage, 2, 0);
+                    for (var tick = 0; tick < 8; tick++) { manager.Rescan(); manager.ObserveLayout(); Pump(20); }
+                    Check(manager.ReadBounds(drifting) == before && Native.GetWindowLongPtr(drifting, Native.GwlStyle) == style
+                        && Native.IsZoomed(drifting) == zoomed && Native.GetForegroundWindow() == foreground
+                        && Native.SendMessage(drifting, TestClientForm.CounterMessage, 0, 0) == 0
+                        && Native.SendMessage(drifting, TestClientForm.CounterMessage, 1, 0) == 0, scenario);
+                }
+                GameChangesItself(manager.Settings.Current.Slots[1].Bounds);
+                AssertObservationDoesNotWrite("Polling leaves game frame bits alone at already-correct slot bounds");
+                foreach (var size in new[] { new Rectangle(10, 10, 400, 300), new Rectangle(30, 20, 420, 320), new Rectangle(10, 10, 400, 300) })
+                {
+                    GameChangesItself(size);
+                    AssertObservationDoesNotWrite("Repeated game-driven drift produces no automatic position, style or focus writes");
+                }
                 if (!liveApp)
                 {
                     Native.ShowWindow(drifting, 3); Pump(); // maximized by the game
-                    manager.EnforceLayout(); Pump(); AssertLayout(1);
-                    Check(!Native.IsZoomed(drifting), "A client that maximizes itself is restored into its slot");
+                    AssertObservationDoesNotWrite("Polling leaves a game-maximized window alone");
+                    Native.ShowWindow(drifting, 4); Pump();
                 }
-                for (var i = 0; i < manager.EnforceLimit; i++) { GameResizesItself(); manager.EnforceLayout(); Pump(); }
-                Check(Framed() && manager.Status.Contains("Account 2 keeps resizing"), "A client that keeps undoing the layout is left alone and reported");
                 manager.ResetLayout(); Pump(); AssertLayout(1);
-                Check(!Framed(), "Reapplying the layout resumes correcting that client");
-                GameResizesItself(); manager.EnforceLayout(); Pump(); AssertLayout(1);
-                Check(!Framed(), "Corrections work again after the layout is reapplied");
-                Pump(200);
+                Check(((long)Native.GetWindowLongPtr(drifting, Native.GwlStyle) & Native.BorderMask) == 0,
+                    "Explicit Reapply layout still restores borderless slot placement");
+                foreach (var main in new[] { 2, 3, 2, 3, 1 }) { manager.Swap(main); manager.ObserveLayout(); }
+                Pump(200); AssertLayout(1);
+                Check(manager.MainAccount == 1, "Rapid swaps with interleaved observation preserve the final layout");
             }
             Check(!manager.Swap(5), "Missing account swap does nothing");
             manager.Paused = true; Check(!manager.Swap(2), "Pause blocks swaps"); manager.Paused = false;
@@ -338,7 +345,22 @@ internal static class SelfTest
             var rejectedAssignment = false;
             try { manager.Assign(6, forgottenClient.Handle); } catch (ArgumentOutOfRangeException) { rejectedAssignment = true; }
             Check(rejectedAssignment && manager.Accounts[2].Pid == replacement.Id, "5-man rejects invalid target slots without changing assignments");
-            for (var i = 4; i <= 10; i++) eligible.Add(StartClient(i).Id);
+            for (var i = 4; i <= 5; i++) eligible.Add(StartClient(i).Id);
+            manager.Rescan(); Pump();
+            Check(manager.Accounts.Count == 5, "All five clients attached before rapid F2–F5 regression sequence");
+            foreach (var client in manager.Accounts.Values) Native.SendMessage(client.Handle, TestClientForm.CounterMessage, 2, 0);
+            using (var rapidKeys = new KeyboardHook(manager, n => { manager.Swap(n); manager.ObserveLayout(); }, () => { }, false))
+                foreach (var key in new[] { Keys.F2, Keys.F3, Keys.F4, Keys.F5 })
+                {
+                    var binding = new KeyBinding((int)key, false, false, false);
+                    Check(rapidKeys.HandleKey(binding, true, manager.Accounts[1].Handle), $"Rapid {key} routes with all five clients attached");
+                    rapidKeys.HandleKey(binding, false, 0);
+                }
+            Pump(200); AssertLayout(5);
+            Check(manager.MainAccount == 5 && manager.Accounts.Values.All(w => Native.SendMessage(w.Handle, TestClientForm.CounterMessage, 1, 0) == 0),
+                "Rapid F2–F5 ends with account 5 main and no frame-style rewrites");
+            manager.ResetLayout(); Pump();
+            for (var i = 6; i <= 10; i++) eligible.Add(StartClient(i).Id);
             manager.SwitchProfile("10-man"); Pump();
             Check(manager.Accounts.Count == 10, "Switch to 10-man discovers all ten clients");
             var extra = StartClient(11); eligible.Add(extra.Id);

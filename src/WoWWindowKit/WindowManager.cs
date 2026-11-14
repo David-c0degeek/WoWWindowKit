@@ -208,8 +208,7 @@ internal sealed class WindowManager : IDisposable
                 }
             }
             MainAccount = targetMain;
-            // An explicit layout pass is a fresh start for windows the app stopped correcting.
-            if (!swapOnly) { gaveUp.Clear(); corrections.Clear(); }
+            if (!swapOnly) observedDrift.Clear();
             status = $"{Accounts.Count(p => p.Key <= Settings.Current.Slots.Count)} / {Settings.Current.Slots.Count} accounts · {Settings.ActiveProfile}";
         }
         catch
@@ -243,26 +242,20 @@ internal sealed class WindowManager : IDisposable
         return true;
     }
     internal void ResetLayout() { ApplyLayout(1); Changed?.Invoke(); }
-    /// <summary>Corrections per window inside <see cref="EnforceWindowMs"/> before the app stops fighting the game.</summary>
-    internal int EnforceLimit = 3;
-    internal int EnforceWindowMs = 10000;
-    private readonly Dictionary<nint, List<long>> corrections = [];
-    private readonly HashSet<nint> gaveUp = [];
+    private readonly Dictionary<nint, (Rectangle Bounds, long Frame, bool Zoomed, int Slot)> observedDrift = [];
     /// <summary>
-    /// Puts managed windows back into their slots when the game moved, resized or re-styled
-    /// itself after the app placed it (WoW can re-add its resize frame and pick its own windowed
-    /// size a moment after a swap). UI thread only. Skips minimized, hung and user-dragged windows.
+    /// Reports game-driven layout changes without touching client geometry or styles.
+    /// Automatic frame/size corrections can cause WoW to repeatedly resize itself.
+    /// UI thread only; explicit swaps and layout actions own all placement writes.
     /// </summary>
-    internal void EnforceLayout()
+    internal void ObserveLayout()
     {
         if (Paused || Editing || MouseInputHeld() || LayoutSettling()) return;
-        var now = Environment.TickCount64;
-        gaveUp.RemoveWhere(h => !Accounts.Values.Any(w => w.Handle == h));
-        foreach (var stale in corrections.Keys.Where(h => !Accounts.Values.Any(w => w.Handle == h)).ToArray()) corrections.Remove(stale);
+        foreach (var stale in observedDrift.Keys.Where(h => !Accounts.Values.Any(w => w.Handle == h)).ToArray()) observedDrift.Remove(stale);
         foreach (var pair in Accounts)
         {
             var window = pair.Value;
-            if (pair.Key > Settings.Current.Slots.Count || !window.Valid || gaveUp.Contains(window.Handle)) continue;
+            if (pair.Key > Settings.Current.Slots.Count || !window.Valid) continue;
             if (Native.IsIconic(window.Handle) || Native.IsHungAppWindow(window.Handle)) continue;
             var slot = SlotFor(pair.Key, MainAccount);
             if (slot < 1 || slot > Settings.Current.Slots.Count) continue;
@@ -272,24 +265,15 @@ internal sealed class WindowManager : IDisposable
             var frame = (Settings.Borderless ? 0 : (long)window.OriginalStyle) & Native.BorderMask;
             var zoomed = Native.IsZoomed(window.Handle);
             var styleWrong = (style & Native.BorderMask) != frame;
-            if (actual == bounds && !styleWrong && !zoomed) continue;
-            if (!corrections.TryGetValue(window.Handle, out var times)) corrections[window.Handle] = times = [];
-            times.RemoveAll(t => now - t > EnforceWindowMs);
-            if (times.Count >= EnforceLimit)
+            if (actual == bounds && !styleWrong && !zoomed)
             {
-                gaveUp.Add(window.Handle);
-                status = $"Account {pair.Key} keeps resizing itself — check WoW's window mode, then Reapply layout";
-                Program.LogLine($"Account {pair.Key}, PID {window.Pid} resized itself {times.Count} times in {EnforceWindowMs} ms; leaving it until the layout is reapplied.");
-                Changed?.Invoke();
+                observedDrift.Remove(window.Handle);
                 continue;
             }
-            times.Add(now);
-            Program.LogLine($"Account {pair.Key}, PID {window.Pid} left slot {slot}: {actual} style 0x{style:X8}{(zoomed ? " maximized" : "")}; restoring {bounds}.");
-            if (zoomed) Native.ShowWindow(window.Handle, 4); // restore without activation
-            // Keep state bits the game owns (visible, disabled, clip flags); replace only the frame bits.
-            if (styleWrong) Native.SetWindowLongPtr(window.Handle, Native.GwlStyle, (nint)((style & ~Native.BorderMask) | frame));
-            try { Native.Position(window.Handle, bounds, styleWrong); }
-            catch (Exception error) { Program.Log(error); }
+            var observation = (actual, style & Native.BorderMask, zoomed, slot);
+            if (observedDrift.TryGetValue(window.Handle, out var previous) && previous == observation) continue;
+            observedDrift[window.Handle] = observation;
+            Program.LogLine($"Observed layout drift: account {pair.Key}, PID {window.Pid}, main {MainAccount}, slot {slot}: {actual} style 0x{style:X8}{(zoomed ? " maximized" : "")}; expected {bounds}. No automatic correction.");
         }
     }
     internal void SwitchProfile(string name)
