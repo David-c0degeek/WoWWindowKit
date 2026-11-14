@@ -30,23 +30,20 @@ internal sealed class KeyboardHook : IDisposable
         }
         return Native.CallNextHookEx(hook, code, message, data);
     }
+    // Runs inside the low-level hook callback: read only the published snapshot, never block.
     internal bool HandleKey(KeyBinding binding, bool down, nint foreground, bool windowsKey = false)
     {
         if (!down) return swallowed.Remove(binding.Key);
         if (swallowed.Contains(binding.Key)) return true; // suppress repeats and the matching key-up
         if (binding.Key != (int)Keys.F && (binding.Key < (int)Keys.F1 || binding.Key > (int)Keys.F12)) return false;
-        if (manager.Editing || windowsKey || !manager.IsManaged(foreground)) return false;
+        var state = manager.Input;
+        if (state.Editing || windowsKey || !manager.IsManaged(foreground)) return false;
         if (binding == new KeyBinding((int)Keys.F, true, true, false))
         {
             swallowed.Add(binding.Key); toggleMouse(); return true;
         }
-        if (manager.Paused) return false;
-        for (var i = 0; i < manager.Settings.Current.Slots.Count; i++)
-        {
-            if (KeyBinding.Parse(manager.Settings.Current.Slots[i].Hotkey) != binding || !manager.Accounts.TryGetValue(i + 1, out var account) || !account.Valid) continue;
-            swallowed.Add(binding.Key); swap(i + 1); return true;
-        }
-        return false;
+        if (state.Paused || !state.SwapKeys.TryGetValue(binding, out var account) || !manager.IsManaged(account.Handle)) return false;
+        swallowed.Add(binding.Key); swap(account.Number); return true;
     }
     public void Dispose() { if (hook != 0) Native.UnhookWindowsHookEx(hook); hook = 0; }
 }

@@ -120,7 +120,18 @@ internal static class SelfTest
                 manager.Editing = true;
                 Check(!router.HandleKey(new((int)Keys.F2, false, false, false), true, originalHandle), "Settings editing pauses hotkeys"); manager.Editing = false;
                 Check(router.HandleKey(new((int)Keys.F, true, true, false), true, originalHandle) && toggled == 1, "Mouse-focus toggle shortcut");
+                manager.Paused = true;
+                Check(!router.HandleKey(new((int)Keys.F3, false, false, false), true, originalHandle), "Pause reaches the hook snapshot immediately"); manager.Paused = false;
+                // Key routing runs off the UI thread in production; it must work from the published snapshot alone.
+                var routed = false;
+                var routeThread = new Thread(() => routed = router.HandleKey(new((int)Keys.F3, false, false, false), true, originalHandle) && swapCalled == 3);
+                routeThread.Start(); routeThread.Join();
+                Check(routed, "F3 routes from a non-UI hook thread");
             }
+            var scanTimer = Stopwatch.StartNew();
+            for (var i = 0; i < 10; i++) manager.Rescan();
+            results.Add($"INFO: Rescan averages {scanTimer.Elapsed.TotalMilliseconds / 10:F2} ms with cached process identity.");
+            Check(manager.Accounts.Count == 3 && manager.Accounts[2].Handle == originalHandle, "Cached process identity keeps assignments across scans");
             var first = manager.Accounts[1].Handle;
             var point = new Native.Point(imported.Current.Slots[0].X + 20, imported.Current.Slots[0].Y + 20);
             Native.SetWindowPos(first, -1, 0, 0, 0, 0, Native.NoActivate | 0x1 | 0x2); Pump();
@@ -176,6 +187,7 @@ internal static class SelfTest
             var forgottenClient = manager.Accounts[2];
             var beforeForgetPlacement = forgottenClient.OriginalPlacement;
             Check(manager.Forget(2), "Forget releases the chosen account");
+            Check(!manager.IsManaged(forgottenClient.Handle) && !manager.Input.SwapKeys.Values.Any(v => v.Handle == forgottenClient.Handle), "Forget removes the window from the hook snapshot immediately");
             Pump();
             var releasedPlacement = new Native.Placement { Length = System.Runtime.InteropServices.Marshal.SizeOf<Native.Placement>() };
             Native.GetWindowPlacement(forgottenClient.Handle, ref releasedPlacement);
@@ -280,6 +292,37 @@ internal static class SelfTest
             // Install the actual low-level hook too; key routing above is exercised without synthetic input.
             using (var actualHook = new KeyboardHook(manager, _ => { }, () => { }))
                 Check(true, "Native keyboard hook installs and disposes");
+            {
+                // Production runs MouseTick on the focus worker; a wake must produce a decision without UI pumping.
+                var stationary = new Native.Point(-30000, -30000);
+                manager.ReadPointer = () => stationary;
+                manager.Swap(1);
+                using var worker = new FocusWorker(manager.MouseTick, 1000);
+                stationary.X++; worker.Wake();
+                var deadline = Environment.TickCount64 + 1000;
+                while (manager.MouseDecision != "Outside" && Environment.TickCount64 < deadline) Thread.Sleep(5);
+                Check(manager.MouseDecision == "Outside", "Focus worker evaluates hover on wake, off the UI thread");
+                manager.ReadPointer = realPointer;
+            }
+            var threadedEvents = 0;
+            using (var hookThread = new HookThread(installed => installed.Add(new MouseHook(() => Interlocked.Increment(ref threadedEvents)))))
+            {
+                Check(true, "Input hooks install on their own thread");
+                if (!liveApp)
+                {
+                    // Block this (UI) thread completely: the hook thread must still receive input.
+                    var delta = 3;
+                    for (var attempt = 0; attempt < 30 && Volatile.Read(ref threadedEvents) == 0; attempt++)
+                    {
+                        var input = new TestMouseInput { Type = 0, X = delta, Flags = 1 };
+                        SendInput(1, ref input, Marshal.SizeOf<TestMouseInput>());
+                        delta = -delta;
+                        Thread.Sleep(20);
+                    }
+                    Check(Volatile.Read(ref threadedEvents) > 0, "Hook thread receives mouse input while the UI thread is blocked");
+                }
+                else results.Add("SKIP: Synthetic pointer movement for the hook thread while user's app is running.");
+            }
             var mouseEvents = 0;
             using (var mouseHook = new MouseHook(() => mouseEvents++))
             {

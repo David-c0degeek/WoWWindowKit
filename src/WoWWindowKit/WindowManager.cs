@@ -14,16 +14,29 @@ internal sealed class ManagedWindow
     internal bool Valid => Native.IsWindow(Handle) && Native.GetWindowThreadProcessId(Handle, out var pid) != 0 && pid == Pid;
 }
 
+/// <summary>Immutable state read by the input-hook and focus threads without touching UI-owned collections.</summary>
+internal sealed record InputState(IReadOnlyDictionary<nint, int> Managed, IReadOnlyDictionary<KeyBinding, (int Number, nint Handle)> SwapKeys, bool Editing, bool Paused, bool MouseFocus);
+
 internal sealed class WindowManager : IDisposable
 {
-    internal AppSettings Settings { get; set; }
+    private AppSettings settings;
+    private bool paused, editing;
+    private volatile InputState input = new(new Dictionary<nint, int>(), new Dictionary<KeyBinding, (int, nint)>(), false, false, false);
+    private volatile bool focusRefused;
+    private string status = "Waiting for WoW windows";
+    private readonly object focusLock = new();
+    private readonly Dictionary<int, (long Created, bool Eligible)> processCache = [];
+    internal AppSettings Settings { get => settings; set { settings = value; processCache.Clear(); Publish(); } }
     internal Dictionary<int, ManagedWindow> Accounts { get; } = [];
     internal int MainAccount { get; private set; } = 1;
-    internal bool Paused { get; set; }
-    internal bool Editing { get; set; }
-    internal string Status { get; private set; } = "Waiting for WoW windows";
+    internal bool Paused { get => paused; set { paused = value; Publish(); } }
+    internal bool Editing { get => editing; set { editing = value; Publish(); } }
+    internal string Status => focusRefused ? "Windows refused focus — click a WoW window once, then retry" : status;
     internal string MouseDecision { get; private set; } = "Idle";
+    internal InputState Input => input;
     internal Action? Changed;
+    /// <summary>Raised on the thread that activated a window; owners must marshal UI work.</summary>
+    internal Action? FocusWarningChanged;
     internal Func<Native.Point?> ReadPointer = static () => Native.GetCursorPos(out var point) ? point : null;
     internal Func<bool> MouseInputHeld = static () => Native.Down(1) || Native.Down(2) || Native.Down(4) || Native.Down(5) || Native.Down(6);
     internal Func<nint, bool> ActivateWindow = Native.Activate;
@@ -34,7 +47,21 @@ internal sealed class WindowManager : IDisposable
     private readonly HashSet<(nint Handle, int Pid, long Start)> forgotten = [];
     private static (nint Handle, int Pid, long Start) Identity(ManagedWindow window) => (window.Handle, window.Pid, window.StartTicks);
     internal bool IsForgotten(ManagedWindow window) => forgotten.Contains(Identity(window));
-    internal WindowManager(AppSettings settings, Func<int, bool>? testProcess = null) { Settings = settings; this.testProcess = testProcess; }
+    internal WindowManager(AppSettings settings, Func<int, bool>? testProcess = null) { this.settings = settings; this.testProcess = testProcess; Publish(); }
+
+    /// <summary>Republishes the snapshot used off the UI thread. Call after changing accounts or settings.</summary>
+    internal void Publish()
+    {
+        var slots = Settings.Current.Slots;
+        var managed = new Dictionary<nint, int>();
+        var keys = new Dictionary<KeyBinding, (int, nint)>();
+        foreach (var pair in Accounts.Where(p => p.Key <= slots.Count))
+        {
+            managed[pair.Value.Handle] = pair.Value.Pid;
+            keys[KeyBinding.Parse(slots[pair.Key - 1].Hotkey)] = (pair.Key, pair.Value.Handle);
+        }
+        input = new InputState(managed, keys, editing, paused, Settings.MouseFocus);
+    }
 
     internal IReadOnlyList<ManagedWindow> Discover()
     {
@@ -45,17 +72,7 @@ internal sealed class WindowManager : IDisposable
             if (!Native.IsWindowVisible(window) || Native.GetWindow(window, 4) != 0) return true; // owned dialogs are not clients
             Native.GetWindowThreadProcessId(window, out var rawPid);
             var pid = (int)rawPid;
-            if (!processes.TryGetValue(pid, out var info))
-            {
-                try
-                {
-                    using var process = Process.GetProcessById(pid);
-                    var eligible = testProcess?.Invoke(pid) ?? Settings.ProcessNames.Contains(process.ProcessName, StringComparer.OrdinalIgnoreCase);
-                    info = (eligible, eligible ? process.StartTime.ToUniversalTime().Ticks : 0);
-                }
-                catch { info = (false, 0); }
-                processes[pid] = info;
-            }
+            if (!processes.TryGetValue(pid, out var info)) processes[pid] = info = ProcessInfo(pid);
             if (!info.Eligible) return true;
             var placement = new Native.Placement { Length = System.Runtime.InteropServices.Marshal.SizeOf<Native.Placement>() };
             if (!Native.GetWindowPlacement(window, ref placement)) return true;
@@ -66,12 +83,36 @@ internal sealed class WindowManager : IDisposable
                 Title = Native.Title(window), OriginalStyle = Native.GetWindowLongPtr(window, Native.GwlStyle), OriginalPlacement = placement });
             return true;
         }, 0);
+        foreach (var stale in processCache.Keys.Where(pid => !processes.ContainsKey(pid)).ToArray()) processCache.Remove(stale);
         return found.OrderBy(w => w.StartTicks).ThenBy(w => w.Handle).ToList();
+    }
+
+    // Process.GetProcessById(...).ProcessName snapshots every process on the system per call.
+    // Instead open each window's process once per scan and reuse its eligibility while the
+    // creation time (which also guards against PID reuse) is unchanged.
+    private (bool Eligible, long Start) ProcessInfo(int pid)
+    {
+        var handle = Native.OpenProcess(0x1000, false, pid); // PROCESS_QUERY_LIMITED_INFORMATION
+        if (handle == 0) return (false, 0);
+        try
+        {
+            if (!Native.GetProcessTimes(handle, out var created, out _, out _, out _)) return (false, 0);
+            var start = DateTime.FromFileTimeUtc(created).Ticks;
+            if (processCache.TryGetValue(pid, out var cached) && cached.Created == created) return (cached.Eligible, cached.Eligible ? start : 0);
+            var eligible = testProcess?.Invoke(pid) ?? (Native.ProcessName(handle) is { } name && Settings.ProcessNames.Contains(name, StringComparer.OrdinalIgnoreCase));
+            processCache[pid] = (created, eligible);
+            return (eligible, eligible ? start : 0);
+        }
+        finally { Native.CloseHandle(handle); }
     }
 
     internal void Rescan()
     {
         if (Editing) return;
+        try { RescanCore(); } finally { Publish(); }
+    }
+    private void RescanCore()
+    {
         forgotten.RemoveWhere(id => !Native.IsWindow(id.Handle) || Native.GetWindowThreadProcessId(id.Handle, out var pid) == 0 || pid != id.Pid);
         var candidates = Discover().Where(w => !IsForgotten(w)).ToList();
         var changed = false;
@@ -113,7 +154,9 @@ internal sealed class WindowManager : IDisposable
     }
 
     internal int SlotFor(int account, int main) => account == main ? 1 : account == 1 ? main : account;
-    internal bool IsManaged(nint window) => Accounts.Any(p => p.Key <= Settings.Current.Slots.Count && p.Value.Handle == window && p.Value.Valid);
+    /// <summary>Thread-safe: checks the published snapshot and that the HWND still belongs to the same process.</summary>
+    internal bool IsManaged(nint window) =>
+        window != 0 && input.Managed.TryGetValue(window, out var pid) && Native.GetWindowThreadProcessId(window, out var actual) != 0 && actual == pid;
     internal nint HoverTarget(Native.Point point)
     {
         var root = Native.RootAt(point);
@@ -145,7 +188,7 @@ internal sealed class WindowManager : IDisposable
                     Native.Position(window.Handle, bounds, styleChanged, asynchronous: swapOnly);
             }
             MainAccount = targetMain;
-            Status = $"{Accounts.Count(p => p.Key <= Settings.Current.Slots.Count)} / {Settings.Current.Slots.Count} accounts · {Settings.ActiveProfile}";
+            status = $"{Accounts.Count(p => p.Key <= Settings.Current.Slots.Count)} / {Settings.Current.Slots.Count} accounts · {Settings.ActiveProfile}";
         }
         catch
         {
@@ -156,12 +199,12 @@ internal sealed class WindowManager : IDisposable
             }
             throw;
         }
+        finally { Publish(); }
     }
     internal bool Swap(int account)
     {
         if (Paused || Editing || account < 1 || account > Settings.Current.Slots.Count || !Accounts.TryGetValue(account, out var window) || !window.Valid) return false;
-        mouseAtSwap = ReadPointer();
-        lastHover = 0;
+        lock (focusLock) { mouseAtSwap = ReadPointer(); lastHover = 0; }
         Activate(window.Handle);
         ApplyLayout(account, swapOnly: true);
         Changed?.Invoke();
@@ -218,38 +261,50 @@ internal sealed class WindowManager : IDisposable
         }
         draft.Validate(); Settings = draft;
     }
+    /// <summary>Hover-focus decision. Thread-safe; production calls it on the focus worker so slow activation never delays input hooks.</summary>
     internal void MouseTick()
     {
-        if (Paused || Editing || !Settings.MouseFocus) { MouseDecision = "Paused"; return; }
+        var state = input;
+        if (state.Paused || state.Editing || !state.MouseFocus) { MouseDecision = "Paused"; return; }
         // Do not transfer a held mouse button to another game window mid-drag.
         if (MouseInputHeld()) { MouseDecision = "Held input"; return; }
         if (ReadPointer() is not { } point) { MouseDecision = "No cursor"; return; }
-        if (mouseAtSwap is { } anchor && point.X == anchor.X && point.Y == anchor.Y) { MouseDecision = "Stationary after swap"; return; }
-        mouseAtSwap = null;
-        var target = HoverTarget(point);
-        if (target == 0) { MouseDecision = "Outside"; lastHover = 0; return; }
-        if (Native.GetForegroundWindow() == target) { ClearFocusFailure(); MouseDecision = "Already focused"; lastHover = target; return; }
-        if (target == lastHover && Environment.TickCount64 < retryFocusAfter) { MouseDecision = "Throttled"; return; }
-        MouseDecision = $"Activating {target}";
-        lastHover = target;
-        retryFocusAfter = Environment.TickCount64 + 25;
-        Activate(target);
+        nint target;
+        bool focused;
+        lock (focusLock)
+        {
+            if (mouseAtSwap is { } anchor && point.X == anchor.X && point.Y == anchor.Y) { MouseDecision = "Stationary after swap"; return; }
+            mouseAtSwap = null;
+            target = HoverTarget(point);
+            if (target == 0) { MouseDecision = "Outside"; lastHover = 0; return; }
+            focused = Native.GetForegroundWindow() == target;
+            if (focused) MouseDecision = "Already focused";
+            else if (target == lastHover && Environment.TickCount64 < retryFocusAfter) { MouseDecision = "Throttled"; return; }
+            else
+            {
+                MouseDecision = $"Activating {target}";
+                retryFocusAfter = Environment.TickCount64 + 25;
+            }
+            lastHover = target;
+        }
+        if (focused) SetFocusRefused(false);
+        else Activate(target);
     }
     private void Activate(nint target)
     {
         if (Native.GetForegroundWindow() == target) return;
-        if (!ActivateWindow(target))
-        {
-            Status = "Windows refused focus — click a WoW window once, then retry";
-            Changed?.Invoke();
-        }
-        else ClearFocusFailure();
+        var timer = Stopwatch.StartNew();
+        var activated = ActivateWindow(target);
+        // Timing evidence for clients that answer focus slowly; normal activation stays silent.
+        if (timer.ElapsedMilliseconds >= 40)
+            Program.LogLine($"Focus {(activated ? "took" : "failed after")} {timer.ElapsedMilliseconds} ms: \"{Native.Title(target)}\"");
+        SetFocusRefused(!activated);
     }
-    private void ClearFocusFailure()
+    private void SetFocusRefused(bool refused)
     {
-        if (!Status.StartsWith("Windows refused focus", StringComparison.Ordinal)) return;
-        Status = $"{Accounts.Count(p => p.Key <= Settings.Current.Slots.Count)} / {Settings.Current.Slots.Count} accounts · {Settings.ActiveProfile}";
-        Changed?.Invoke();
+        if (focusRefused == refused) return;
+        focusRefused = refused;
+        FocusWarningChanged?.Invoke();
     }
     private static void Restore(ManagedWindow window)
     {

@@ -20,6 +20,7 @@ internal static class Native
         public Rect Normal;
     }
     [StructLayout(LayoutKind.Sequential)] internal struct KeyData { public uint Key, ScanCode, Flags, Time; public nuint Extra; }
+    [StructLayout(LayoutKind.Sequential)] internal struct Message { public nint Window; public uint Id; public nint WParam, LParam; public uint Time; public Point Point; }
     [DllImport("user32.dll")] internal static extern bool EnumWindows(EnumProc callback, nint data);
     [DllImport("user32.dll")] internal static extern bool IsWindow(nint window);
     [DllImport("user32.dll")] internal static extern bool IsWindowVisible(nint window);
@@ -39,6 +40,13 @@ internal static class Native
     [DllImport("user32.dll")] internal static extern bool AttachThreadInput(uint from, uint to, bool attach);
     [DllImport("user32.dll")] internal static extern bool IsHungAppWindow(nint window);
     [DllImport("kernel32.dll")] internal static extern uint GetCurrentThreadId();
+    [DllImport("kernel32.dll")] internal static extern nint OpenProcess(uint access, bool inherit, int pid);
+    [DllImport("kernel32.dll")] internal static extern bool CloseHandle(nint handle);
+    [DllImport("kernel32.dll")] internal static extern bool GetProcessTimes(nint process, out long created, out long exited, out long kernel, out long user);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] internal static extern bool QueryFullProcessImageName(nint process, uint flags, StringBuilder name, ref int size);
+    [DllImport("user32.dll")] internal static extern int GetMessage(out Message message, nint window, uint min, uint max);
+    [DllImport("user32.dll")] internal static extern bool PeekMessage(out Message message, nint window, uint min, uint max, uint remove);
+    [DllImport("user32.dll")] internal static extern bool PostThreadMessage(uint thread, uint message, nint wp, nint lp);
     [DllImport("user32.dll", SetLastError = true)] internal static extern bool SetWindowPos(nint window, nint after, int x, int y, int width, int height, uint flags);
     [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")] internal static extern nint GetWindowLongPtr(nint window, int index);
     [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW", SetLastError = true)] internal static extern nint SetWindowLongPtr(nint window, int index, nint value);
@@ -57,23 +65,41 @@ internal static class Native
     internal static string Title(nint window) { var text = new StringBuilder(1024); GetWindowText(window, text, text.Capacity); return text.ToString(); }
     internal static bool Down(int key) => GetAsyncKeyState(key) < 0;
     internal static nint RootAt(Point point) => GetAncestor(WindowFromPoint(point), 2);
+    // Serializes activation between the focus worker and UI-thread swaps; both may attach input queues.
+    private static readonly object activationGate = new();
     internal static bool Activate(nint target)
     {
-        if (GetForegroundWindow() == target) return true;
-        if (SetForegroundWindow(target)) return true;
-        var foreground = GetForegroundWindow();
-        if (foreground == 0 || IsHungAppWindow(foreground) || IsHungAppWindow(target)) return false;
-        var foregroundThread = GetWindowThreadProcessId(foreground, out _);
-        var targetThread = GetWindowThreadProcessId(target, out _);
-        var thisThread = GetCurrentThreadId();
-        var attachedForeground = thisThread != foregroundThread && AttachThreadInput(thisThread, foregroundThread, true);
-        var attachedTarget = targetThread != thisThread && targetThread != foregroundThread && AttachThreadInput(thisThread, targetThread, true);
-        try { BringWindowToTop(target); SetActiveWindow(target); return SetForegroundWindow(target); }
-        finally
+        lock (activationGate)
         {
-            if (attachedTarget) AttachThreadInput(thisThread, targetThread, false);
-            if (attachedForeground) AttachThreadInput(thisThread, foregroundThread, false);
+            if (GetForegroundWindow() == target) return true;
+            if (SetForegroundWindow(target)) return true;
+            var foreground = GetForegroundWindow();
+            if (foreground == 0 || IsHungAppWindow(foreground) || IsHungAppWindow(target)) return false;
+            var foregroundThread = GetWindowThreadProcessId(foreground, out _);
+            var targetThread = GetWindowThreadProcessId(target, out _);
+            var thisThread = GetCurrentThreadId();
+            // Sharing only the current foreground queue grants foreground rights. It leaves the
+            // target's input state alone and avoids synchronous calls into its busy render thread.
+            if (thisThread != foregroundThread && AttachThreadInput(thisThread, foregroundThread, true))
+            {
+                try { if (SetForegroundWindow(target) || GetForegroundWindow() == target) return true; }
+                finally { AttachThreadInput(thisThread, foregroundThread, false); }
+            }
+            var attachedForeground = thisThread != foregroundThread && AttachThreadInput(thisThread, foregroundThread, true);
+            var attachedTarget = targetThread != thisThread && targetThread != foregroundThread && AttachThreadInput(thisThread, targetThread, true);
+            try { BringWindowToTop(target); SetActiveWindow(target); return SetForegroundWindow(target); }
+            finally
+            {
+                if (attachedTarget) AttachThreadInput(thisThread, targetThread, false);
+                if (attachedForeground) AttachThreadInput(thisThread, foregroundThread, false);
+            }
         }
+    }
+    /// <summary>Executable name without extension, or null when the process cannot be queried.</summary>
+    internal static string? ProcessName(nint process)
+    {
+        var text = new StringBuilder(1024); var size = text.Capacity;
+        return QueryFullProcessImageName(process, 0, text, ref size) ? Path.GetFileNameWithoutExtension(text.ToString(0, size)) : null;
     }
     internal static void Position(nint window, Rectangle bounds, bool frameChanged = true, bool asynchronous = false)
     {

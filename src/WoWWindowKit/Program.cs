@@ -64,13 +64,19 @@ internal static class Program
         if (index + 1 >= args.Length) throw new ArgumentException($"{option} needs a value.");
         return args[index + 1];
     }
-    internal static void Log(Exception error)
+    internal static void Log(Exception error) => LogLine(error.ToString());
+    private static readonly object logGate = new();
+    // Called from the UI, focus and hook threads.
+    internal static void LogLine(string text)
     {
         try
         {
-            var path = Path.Combine(AppContext.BaseDirectory, "app.log");
-            if (File.Exists(path) && new FileInfo(path).Length > 1024 * 1024) File.Move(path, path + ".old", true);
-            File.AppendAllText(path, $"{DateTimeOffset.Now:O} {error}\n");
+            lock (logGate)
+            {
+                var path = Path.Combine(AppContext.BaseDirectory, "app.log");
+                if (File.Exists(path) && new FileInfo(path).Length > 1024 * 1024) File.Move(path, path + ".old", true);
+                File.AppendAllText(path, $"{DateTimeOffset.Now:O} {text}\n");
+            }
         }
         catch { /* logging must not prevent recovery */ }
     }

@@ -1,5 +1,45 @@
 # Implementation decisions and pre-mortem
 
+## Input latency under hover focus (v1.0.4)
+
+Observed by user: holding a key while sweeping across clients, the key often
+arrives late or needs a second press; one client (account 6) suffers most.
+WowOpenBox did not show this.
+
+Cause [evidence: TrayApp, KeyboardHook, MouseHook, Native.Activate]: both
+low-level hooks were installed on the UI thread. Windows holds every keystroke
+and mouse event system-wide until a low-level hook callback returns, and that
+thread also ran each hover activation synchronously (including the fallback
+that attaches to game input queues and calls SetActiveWindow/BringWindowToTop,
+which wait for the game's own thread), the one-second window scan, and UI
+refreshes. Every slow focus change therefore delayed the very key the user was
+holding.
+
+Changes:
+- Hooks run on a dedicated high-priority thread with its own message loop. The
+  callbacks read an immutable snapshot (managed HWND/PID, swap keys, pause,
+  editing, mouse focus) published by the UI thread, and only post work or wake
+  the focus worker.
+- Hover focus runs on a separate worker thread, woken by mouse events, with the
+  configured poll interval as fallback. Activation is serialized with UI-thread
+  swaps by a lock.
+- Activation first attaches only to the current foreground thread, which grants
+  foreground rights without touching the target's input state or sending it
+  synchronous messages. The previous full attach remains the last resort. No
+  input is injected (PM-2 unchanged).
+- Window scans no longer call Process.GetProcessById(...).ProcessName (a full
+  system process snapshot per window process). Eligibility is cached by PID and
+  creation time, which also guards against PID reuse.
+- Activations taking 40 ms or more are logged to app.log with the window title,
+  so slow clients can be identified from real sessions.
+
+Verification: 92 integration checks pass, including key routing from a non-UI
+thread, pause/forget reaching the hook snapshot immediately, and the focus
+worker deciding without UI pumping. Rescan of the mock set averages under 1 ms.
+The hook-thread input test and native foreground tests skip while the user's
+app is running and need a run with the tray app closed. Live WoW acceptance:
+hold a key while sweeping across all clients; check app.log for slow-focus lines.
+
 ## Compact controls (v1.0.3)
 
 Add a dark modeless control window, visible by default: live account list, profile,

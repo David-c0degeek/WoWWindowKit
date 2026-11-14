@@ -19,17 +19,15 @@ internal sealed class TrayApp : ApplicationContext
     private readonly WindowManager manager;
     private readonly NotifyIcon tray;
     private readonly ContextMenuStrip menu = new();
-    private readonly System.Windows.Forms.Timer timer = new();
-    private readonly KeyboardHook keyboard;
-    private readonly MouseHook mouse;
-    private bool mousePending;
+    private readonly System.Windows.Forms.Timer timer = new() { Interval = 1000 };
+    private readonly HookThread hooks;
+    private readonly FocusWorker focus;
     private readonly ControlWindow commands = new();
     private readonly Control dispatcher = new();
     private readonly ControlsForm controls;
     private SettingsForm? editor;
-    private long nextScan;
     private string lastError = "";
-    private bool disposed;
+    private volatile bool disposed;
     internal TrayApp(AppSettings settings)
     {
         manager = new WindowManager(settings);
@@ -37,16 +35,15 @@ internal sealed class TrayApp : ApplicationContext
         _ = dispatcher.Handle;
         tray = new NotifyIcon { Icon = SystemIcons.Application, ContextMenuStrip = menu, Visible = true };
         controls = new ControlsForm(manager, Safe, SetProfile, ToggleMouse, TogglePause, ShowSettings, ExitThread);
-        keyboard = new KeyboardHook(manager,
-            account => dispatcher.BeginInvoke(() => Safe(() => manager.Swap(account))),
-            () => dispatcher.BeginInvoke(() => Safe(ToggleMouse)));
-        mouse = new MouseHook(() =>
+        focus = new FocusWorker(manager.MouseTick, settings.MousePollMs);
+        // Hook callbacks only read a snapshot, post to the UI thread, or wake the focus worker.
+        hooks = new HookThread(installed =>
         {
-            if (disposed || mousePending) return;
-            mousePending = true;
-            dispatcher.BeginInvoke(() => { mousePending = false; if (!disposed) Safe(manager.MouseTick); });
+            installed.Add(new KeyboardHook(manager, account => Post(() => manager.Swap(account)), () => Post(ToggleMouse)));
+            installed.Add(new MouseHook(focus.Wake));
         });
         manager.Changed = UpdateTray;
+        manager.FocusWarningChanged = () => Post(UpdateTray);
         tray.DoubleClick += (_, _) => ShowControls();
         menu.Opening += (_, _) => { manager.Editing = true; Safe(BuildMenu); };
         menu.Closed += (_, _) => { if (editor == null) manager.Editing = false; };
@@ -57,18 +54,19 @@ internal sealed class TrayApp : ApplicationContext
             if (command is 5 or 10) SetProfile(command == 5 ? "5-man" : "10-man");
             ShowControls();
         }));
-        timer.Interval = settings.MousePollMs;
         timer.Tick += (_, _) => Safe(() =>
         {
-            manager.MouseTick();
-            if (Environment.TickCount64 >= nextScan)
-            {
-                nextScan = Environment.TickCount64 + 1000;
-                if (!manager.Paused) manager.Rescan();
-                UpdateTray();
-            }
+            if (!manager.Paused) manager.Rescan();
+            UpdateTray();
         });
         UpdateTray(); Safe(manager.Rescan); timer.Start();
+    }
+    /// <summary>Queues work for the UI thread from any thread without waiting.</summary>
+    private void Post(Action action)
+    {
+        if (disposed) return;
+        try { dispatcher.BeginInvoke(() => { if (!disposed) Safe(action); }); }
+        catch (InvalidOperationException) { /* shutting down */ }
     }
     private void BuildMenu()
     {
@@ -108,7 +106,7 @@ internal sealed class TrayApp : ApplicationContext
         if (editor is { IsDisposed: false }) { editor.Activate(); return; }
         manager.SwitchProfile(name); manager.Settings.Save(AppSettings.FilePath); UpdateTray();
     }
-    private void ToggleMouse() { manager.Settings.MouseFocus = !manager.Settings.MouseFocus; manager.Settings.Save(AppSettings.FilePath); UpdateTray(); }
+    private void ToggleMouse() { manager.Settings.MouseFocus = !manager.Settings.MouseFocus; manager.Publish(); manager.Settings.Save(AppSettings.FilePath); UpdateTray(); }
     private void TogglePause()
     {
         manager.Paused = !manager.Paused;
@@ -145,7 +143,7 @@ internal sealed class TrayApp : ApplicationContext
                         manager.ApplyLayout(main);
                         throw;
                     }
-                    timer.Interval = draft.MousePollMs; UpdateTray();
+                    focus.PollMs = draft.MousePollMs; UpdateTray();
                 });
                 editor = form;
                 // A hidden launcher must not hide an explicitly requested Settings window.
@@ -169,7 +167,8 @@ internal sealed class TrayApp : ApplicationContext
     {
         if (!disposed)
         {
-            disposed = true; editor?.Close(); controls.Dispose(); timer.Stop(); keyboard.Dispose(); mouse.Dispose(); manager.Dispose();
+            // Stop input threads before windows are restored so nothing re-activates them.
+            disposed = true; hooks.Dispose(); focus.Dispose(); editor?.Close(); controls.Dispose(); timer.Stop(); manager.Dispose();
             tray.Visible = false; tray.Dispose(); timer.Dispose(); menu.Dispose(); commands.Dispose(); dispatcher.Dispose();
         }
         base.ExitThreadCore();
