@@ -70,8 +70,8 @@ cd WoWWindowKit
 The portable build includes the runtime. If you already have a built `dist` folder,
 start with the launchers below.
 
-1. **Exit OpenMultiBoxing / WowOpenBox if it is running.** Both apps drive Windows'
-   active window tracking for mouse focus and would compete for it.
+1. **Close other window-management tools.** Tools that also control window
+   layouts or mouse focus can compete with WoWWindowKit.
 2. **Choose your party size.** Run `Start 5-man.cmd` or `Start 10-man.cmd` in `dist`.
 3. **Start your WoW clients normally.** They attach automatically in process-start
    order. Existing `WoW 1` … `WoW 10` titles retain their numbers where possible.
@@ -108,7 +108,7 @@ Hover focus works only over an exposed, managed WoW window. Move over the deskto
 another app, or a window covering WoW and focus changes stop. Return to a managed
 game window and they resume.
 
-Like WowOpenBox, focus switching uses Windows' own *active window tracking*:
+Focus switching uses Windows' own *active window tracking*:
 Windows changes focus while it handles the mouse movement, so a key you hold while
 sweeping across clients reaches each client as soon as the pointer enters it.
 The app turns tracking on only while the pointer is over an exposed managed WoW
@@ -240,8 +240,3 @@ behavior and rendering after resize require a live-session check.
 See [implementation decisions and verification notes](docs/implementation.md)
 for design rationale and known validation limits.
 
----
-
-WoWWindowKit is an independent utility. The source and imported layouts are
-independent of the original app installation; its files, launchers, and settings
-are left untouched. No upstream WowOpenBox code is included.
