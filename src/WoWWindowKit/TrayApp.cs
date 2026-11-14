@@ -19,7 +19,8 @@ internal sealed class TrayApp : ApplicationContext
     private readonly WindowManager manager;
     private readonly NotifyIcon tray;
     private readonly ContextMenuStrip menu = new();
-    private readonly System.Windows.Forms.Timer timer = new() { Interval = 1000 };
+    private readonly System.Windows.Forms.Timer timer = new() { Interval = 250 };
+    private int ticks;
     private readonly HookThread hooks;
     private readonly FocusWorker focus;
     private readonly WindowTracking tracking;
@@ -61,8 +62,9 @@ internal sealed class TrayApp : ApplicationContext
         }));
         timer.Tick += (_, _) => Safe(() =>
         {
-            if (!manager.Paused) manager.Rescan();
-            UpdateTray();
+            // Layout drift is cheap to check and must be caught fast; window discovery runs once a second.
+            if (!manager.Paused) { if (ticks++ % 4 == 0) manager.Rescan(); manager.EnforceLayout(); }
+            if (ticks % 4 == 1) UpdateTray();
         });
         UpdateTray(); Safe(manager.Rescan); timer.Start();
     }

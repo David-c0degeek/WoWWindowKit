@@ -135,6 +135,13 @@ main. A stationary pointer then leaves the chosen account active; the first mous
 movement resumes hover focus. Mouse transitions are event-driven, with a periodic
 fallback for windows appearing beneath a stationary pointer.
 
+The layout is kept, not just applied once. If a client moves, resizes, maximizes
+or puts its own window frame back (WoW can do this a moment after a swap), the
+app returns it to its slot within a quarter of a second and logs the correction
+in `app.log`. A client that undoes the correction three times in ten seconds is
+left alone and named in the status line until you reapply the layout. To arrange
+windows by hand for **Save current window positions**, pause first.
+
 ## Everyday controls
 
 The compact dark control window opens on startup. It shows each slot, its hotkey,

@@ -117,6 +117,45 @@ internal static class SelfTest
             foreach (var main in new[] { 3, 1, 2, 3, 2, 1 }) manager.Swap(main);
             Pump(200); AssertLayout(1);
             Check(manager.MainAccount == 1, "Rapid async swaps preserve the final logical layout");
+            {
+                // Real WoW can re-add its resize frame and choose its own windowed size after a swap.
+                var settle = Environment.TickCount64 + 2000;
+                while (manager.LayoutSettling() && Environment.TickCount64 < settle) Pump(20);
+                var drifting = manager.Accounts[2].Handle;
+                void GameResizesItself()
+                {
+                    var current = (long)Native.GetWindowLongPtr(drifting, Native.GwlStyle);
+                    Native.SetWindowLongPtr(drifting, Native.GwlStyle, (nint)(current | 0x00050000)); // WS_THICKFRAME | WS_MAXIMIZEBOX
+                    Native.SetWindowPos(drifting, 0, 10, 10, 400, 300, Native.NoActivate | Native.NoZOrder | Native.FrameChanged);
+                    Pump();
+                }
+                bool Framed() => ((long)Native.GetWindowLongPtr(drifting, Native.GwlStyle) & Native.BorderMask) != 0;
+                GameResizesItself();
+                manager.EnforceLayout(); Pump(); AssertLayout(1);
+                Check(!Framed(), "A client that re-adds its frame and resizes itself is put back, borderless, in its slot");
+                GameResizesItself();
+                manager.Paused = true; manager.EnforceLayout(); Pump();
+                Check(Framed() && manager.ReadBounds(drifting) == new Rectangle(10, 10, 400, 300), "Pause leaves hand-moved windows alone");
+                manager.Paused = false;
+                var held = manager.MouseInputHeld; manager.MouseInputHeld = static () => true;
+                manager.EnforceLayout(); Pump();
+                Check(Framed(), "A held mouse button (dragging a window) defers layout correction");
+                manager.MouseInputHeld = held;
+                manager.EnforceLayout(); Pump(); AssertLayout(1);
+                if (!liveApp)
+                {
+                    Native.ShowWindow(drifting, 3); Pump(); // maximized by the game
+                    manager.EnforceLayout(); Pump(); AssertLayout(1);
+                    Check(!Native.IsZoomed(drifting), "A client that maximizes itself is restored into its slot");
+                }
+                for (var i = 0; i < manager.EnforceLimit; i++) { GameResizesItself(); manager.EnforceLayout(); Pump(); }
+                Check(Framed() && manager.Status.Contains("Account 2 keeps resizing"), "A client that keeps undoing the layout is left alone and reported");
+                manager.ResetLayout(); Pump(); AssertLayout(1);
+                Check(!Framed(), "Reapplying the layout resumes correcting that client");
+                GameResizesItself(); manager.EnforceLayout(); Pump(); AssertLayout(1);
+                Check(!Framed(), "Corrections work again after the layout is reapplied");
+                Pump(200);
+            }
             Check(!manager.Swap(5), "Missing account swap does nothing");
             manager.Paused = true; Check(!manager.Swap(2), "Pause blocks swaps"); manager.Paused = false;
             var swapCalled = 0; var toggled = 0;
