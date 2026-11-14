@@ -21,6 +21,24 @@
 
 ---
 
+## Multiboxing policy and input broadcasting
+
+**No input broadcasting. No gameplay automation.** WoWWindowKit arranges game
+windows and changes which window has focus. It does not copy keystrokes or mouse
+clicks to multiple clients, send gameplay commands to background clients, or
+perform rotations, movement, or other gameplay actions for you. You control each
+account yourself.
+
+[Blizzard's multiboxing policy](https://eu.support.blizzard.com/en/article/24258)
+states that playing multiple WoW accounts is not itself a violation of its EULA.
+However, its
+[official input-broadcasting policy](https://us.forums.blizzard.com/en/wow/t/policy-update-for-input-broadcasting-may-2021/956613)
+also prohibits software or hardware that mirrors commands across accounts or
+automates or streamlines multiboxing. **The absence of broadcasting alone does
+not establish compliance.** Blizzard has not approved WoWWindowKit; this README
+cannot guarantee that its window-switching or hover-focus features are permitted
+under Blizzard's interpretation of that policy.
+
 Keep one client in the large main slot and the rest within reach. Press an account's
 hotkey to bring it forward, or move your pointer over an exposed game window to
 focus it. Account numbers stay the same as windows change position.
