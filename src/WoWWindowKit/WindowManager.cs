@@ -45,6 +45,15 @@ internal sealed class WindowManager : IDisposable
     /// <summary>How long Windows gets to activate a hovered window before the app does it itself.</summary>
     internal int TrackingGraceMs = 150;
     private volatile bool trackingOn;
+    private readonly object trackingLock = new();
+    private Native.Point? trackingHeldAt;
+    /// <summary>After a swap, windows still on their way to new slots; null targets = not yet issued.</summary>
+    private sealed record Settling(long Deadline, (nint Handle, Rectangle Bounds)[]? Targets);
+    private volatile Settling? settling;
+    private List<(nint Handle, Rectangle Bounds)>? recordedMoves;
+    /// <summary>Upper bound for waiting on a game to apply its swap resize.</summary>
+    internal int SettleTimeoutMs = 1000;
+    internal Func<nint, Rectangle?> ReadBounds = static handle => Native.GetWindowRect(handle, out var rect) ? rect.Rectangle : null;
     private long hoverSince;
     private Native.Point? mouseAtSwap;
     private nint lastHover;
@@ -193,7 +202,10 @@ internal sealed class WindowManager : IDisposable
                 if (Native.IsIconic(window.Handle)) Native.ShowWindow(window.Handle, 4); // show without activation
                 var bounds = Settings.Current.Slots[slot - 1].Bounds;
                 if (swapOnly || styleChanged || before.Rectangle != bounds)
+                {
                     Native.Position(window.Handle, bounds, styleChanged, asynchronous: swapOnly);
+                    recordedMoves?.Add((window.Handle, bounds));
+                }
             }
             MainAccount = targetMain;
             status = $"{Accounts.Count(p => p.Key <= Settings.Current.Slots.Count)} / {Settings.Current.Slots.Count} accounts · {Settings.ActiveProfile}";
@@ -212,9 +224,19 @@ internal sealed class WindowManager : IDisposable
     internal bool Swap(int account)
     {
         if (Paused || Editing || account < 1 || account > Settings.Current.Slots.Count || !Accounts.TryGetValue(account, out var window) || !window.Valid) return false;
-        lock (focusLock) { mouseAtSwap = ReadPointer(); lastHover = 0; }
+        Native.Point? anchor;
+        lock (focusLock) { anchor = mouseAtSwap = ReadPointer(); lastHover = 0; }
+        // Activating the new main reorders windows, and Windows then re-checks the window under the
+        // stationary pointer: still the old main. With tracking on it would take focus straight back,
+        // and keep it as it shrinks into the new main's old slot. Hold tracking off until the mouse moves.
+        // Games apply the asynchronous resize a frame or more later; until then the old main is
+        // still the big window under the pointer, and any hover focus would hand it focus again.
+        settling = new Settling(Environment.TickCount64 + SettleTimeoutMs, null);
+        HoldTracking(anchor);
         Activate(window.Handle);
-        ApplyLayout(account, swapOnly: true);
+        recordedMoves = [];
+        try { ApplyLayout(account, swapOnly: true); }
+        finally { settling = new Settling(Environment.TickCount64 + SettleTimeoutMs, [.. recordedMoves]); recordedMoves = null; }
         Changed?.Invoke();
         return true;
     }
@@ -274,14 +296,49 @@ internal sealed class WindowManager : IDisposable
     /// own tracking is on only while the new position is over an exposed managed window,
     /// so it can never activate another app.
     /// </summary>
+    /// <summary>True while windows moved by the last swap have not reached their new slots (thread-safe).</summary>
+    internal bool LayoutSettling()
+    {
+        var current = settling;
+        if (current == null) return false;
+        var done = Environment.TickCount64 >= current.Deadline
+            || current.Targets is { } targets && targets.All(t => !Native.IsWindow(t.Handle) || ReadBounds(t.Handle) == t.Bounds);
+        if (done) Interlocked.CompareExchange(ref settling, null, current);
+        return !done;
+    }
     internal void PointerMoved(Native.Point point)
     {
         if (SystemTracking == null) return;
         var state = input;
-        var on = state.MouseFocus && !state.Paused && !state.Editing && !MouseInputHeld() && HoverTarget(point) != 0;
-        if (on == trackingOn) return;
-        SystemTracking(on);
-        trackingOn = on;
+        lock (trackingLock)
+        {
+            if (LayoutSettling())
+            {
+                if (trackingOn) { SystemTracking(false); trackingOn = false; }
+                return;
+            }
+            if (trackingHeldAt is { } held)
+            {
+                if (held.X == point.X && held.Y == point.Y) return;
+                trackingHeldAt = null;
+            }
+            var on = state.MouseFocus && !state.Paused && !state.Editing && !MouseInputHeld() && HoverTarget(point) != 0;
+            if (on == trackingOn) return;
+            SystemTracking(on);
+            trackingOn = on;
+        }
+    }
+    /// <summary>Turns Windows' tracking off until the pointer leaves <paramref name="anchor"/>.</summary>
+    private void HoldTracking(Native.Point? anchor)
+    {
+        if (SystemTracking == null) return;
+        lock (trackingLock)
+        {
+            trackingHeldAt = anchor ?? new Native.Point(int.MinValue, int.MinValue);
+            if (!trackingOn) return;
+            SystemTracking(false);
+            trackingOn = false;
+        }
     }
     /// <summary>Hover-focus decision. Thread-safe; production calls it on the focus worker so slow activation never delays input hooks.</summary>
     internal void MouseTick()
@@ -291,6 +348,7 @@ internal sealed class WindowManager : IDisposable
         // Do not transfer a held mouse button to another game window mid-drag.
         if (MouseInputHeld()) { MouseDecision = "Held input"; return; }
         if (ReadPointer() is not { } point) { MouseDecision = "No cursor"; return; }
+        if (LayoutSettling()) { MouseDecision = "Layout settling"; return; }
         nint target;
         bool focused;
         lock (focusLock)

@@ -187,6 +187,32 @@ internal static class SelfTest
                     Thread.Sleep(80); manager.MouseTick();
                     Check(activations == 1, "App activates directly if Windows' tracking did not within the grace period");
                 }
+                // Swap under a stationary pointer (activation stubbed): tracking must stay off until real movement.
+                requested.Clear();
+                manager.Swap(2); Pump(200);
+                manager.PointerMoved(point);
+                Check(requested.SequenceEqual([false]), "Keyboard swap holds Windows tracking off under a stationary pointer");
+                manager.PointerMoved(point with { X = point.X + 1 });
+                Check(requested.SequenceEqual([false, true]), "First real mouse movement after a swap re-enables Windows tracking");
+                manager.Swap(1); manager.PointerMoved(point with { X = point.X + 2 });
+                // Real games resize a frame or more later. Until then the old main is still under the pointer.
+                var realBounds = manager.ReadBounds; var stale = true;
+                manager.ReadBounds = h => stale ? Rectangle.Empty : realBounds(h);
+                Pump(200); requested.Clear();
+                manager.Swap(2);
+                var activationsBefore = activations; // the swap's own activation is not hover focus
+                manager.PointerMoved(point with { X = point.X + 7 }); // sensor jitter during the resize
+                Check(manager.LayoutSettling() && !requested.Contains(true), "Mouse movement while swapped windows resize keeps Windows tracking off");
+                manager.MouseTick();
+                Check(manager.MouseDecision == "Layout settling" && activations == activationsBefore, "App hover focus waits for swapped windows to reach their slots");
+                stale = false; Pump(200);
+                manager.PointerMoved(point with { X = point.X + 8 });
+                Check(!manager.LayoutSettling() && requested.LastOrDefault(), "Hover focus resumes once swapped windows reach their slots");
+                stale = true; manager.SettleTimeoutMs = 60;
+                manager.Swap(1); Thread.Sleep(80);
+                Check(!manager.LayoutSettling(), "A game that never applies its resize cannot block hover focus past the timeout");
+                manager.ReadBounds = realBounds; manager.SettleTimeoutMs = 1000; Pump(200);
+                manager.PointerMoved(point with { X = point.X + 9 });
                 manager.PointerMoved(new Native.Point(-30000, -30000));
                 manager.SystemTracking = null; manager.ActivateWindow = activate; manager.TrackingGraceMs = 150;
             }
@@ -440,9 +466,17 @@ internal static class SelfTest
                             SendInput(1, ref input, Marshal.SizeOf<TestMouseInput>());
                             Pump(25);
                         }
+                        Native.GetCursorPos(out var cursorNow);
+                        Check(Native.GetForegroundWindow() == tracked.Handle && appActivations == 0, $"Windows' active window tracking focuses the hovered client by itself (tracking={system.Enabled}; input={manager.Input.MouseFocus}/{manager.Input.Paused}/{manager.Input.Editing}; hover={manager.HoverTarget(cursorNow)}; target={tracked.Handle}; managed={manager.IsManaged(tracked.Handle)}; foreground={Native.Title(Native.GetForegroundWindow())}; appActivations={appActivations}; original={system.Original})");
+                        // Regression: a keyboard swap under the stationary pointer must keep the chosen account
+                        // focused; Windows' re-check of the window under the pointer must not hand focus back.
+                        manager.ActivateWindow = activateBefore;
+                        var swapTo = manager.Accounts.Where(p => p.Key != 1 && p.Key <= manager.Settings.Current.Slots.Count && p.Value.Valid).Select(p => p.Key).First();
+                        manager.Swap(swapTo); Pump(700);
+                        Check(Native.GetForegroundWindow() == manager.Accounts[swapTo].Handle,
+                            $"Keyboard swap keeps the chosen account focused with Windows tracking on (foreground={Native.Title(Native.GetForegroundWindow())}; expected=account {swapTo})");
+                        manager.Swap(1); Pump(300);
                     }
-                    Native.GetCursorPos(out var cursorNow);
-                    Check(Native.GetForegroundWindow() == tracked.Handle && appActivations == 0, $"Windows' active window tracking focuses the hovered client by itself (tracking={system.Enabled}; input={manager.Input.MouseFocus}/{manager.Input.Paused}/{manager.Input.Editing}; hover={manager.HoverTarget(cursorNow)}; target={tracked.Handle}; managed={manager.IsManaged(tracked.Handle)}; foreground={Native.Title(Native.GetForegroundWindow())}; appActivations={appActivations}; original={system.Original})");
                     manager.SystemTracking = null;
                     system.Dispose();
                     Check(!File.Exists(marker) && new WindowTracking(marker).Original == before, "Live tracking test restores the user's system setting");

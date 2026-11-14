@@ -119,7 +119,9 @@ Windows has not switched to the hovered client within 150 ms, the app switches
 focus itself.
 
 Focus pauses while a mouse button is held or Settings is open. After a hotkey
-swap, a stationary pointer leaves the chosen account active; the first mouse
+swap, hover focus waits until the clients have finished moving to their new slots,
+so a small mouse movement during the swap cannot hand focus back to the previous
+main. A stationary pointer then leaves the chosen account active; the first mouse
 movement resumes hover focus. Mouse transitions are event-driven, with a periodic
 fallback for windows appearing beneath a stationary pointer.
 

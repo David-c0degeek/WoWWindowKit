@@ -1,5 +1,30 @@
 # Implementation decisions and pre-mortem
 
+## Swap keeps focus on the new main (v1.0.7)
+
+Observed by user: pressing F5 to make the hunter main left focus on the old main,
+which ended up in the hunter's small bottom-right slot.
+
+Ruled out [probe on live clients]: WoW does not drag the cursor when its active
+window is moved or resized, and the app never moves it. A mock-window swap with
+real Windows tracking also kept focus correctly, so this is not Windows re-checking
+a stationary pointer by itself.
+
+Cause [inference]: swaps use asynchronous SetWindowPos, which the game applies on
+its own thread a frame or more later. The old main has just lost focus and renders
+at background frame rate, so for roughly 100–300 ms (focus timings in the log)
+it is still the big window under the pointer. Any mouse movement in that window,
+including sensor jitter, makes hover focus (Windows tracking since v1.0.6, app
+activation before that) activate the window under the pointer: the old main.
+It then shrinks into the new main's old slot with focus. Mock windows apply moves
+immediately, which is why they could not reproduce it.
+
+Fix: a swap records the target bounds of every window it moves. Until all of them
+report those bounds (or 1 s passes), the mouse hook keeps Windows tracking off and
+the focus worker makes no hover decisions. Tracking also stays held off after a
+swap until the pointer actually moves. Tests cover jitter during the resize, resume
+after settling, the timeout, and a live swap with real tracking.
+
 ## Mouse focus via Windows active window tracking (v1.0.6), PM-2 reversed
 
 Decision (user, 2026-11-14): reverse PM-2's "must not modify global Windows
