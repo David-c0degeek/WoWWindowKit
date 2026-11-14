@@ -34,8 +34,9 @@ focus it. Account numbers stay the same as windows change position.
 | **Restore on exit** | Return managed windows to their original styles and positions. |
 
 WoWWindowKit manages windows and focus. It does not move the mouse, inject clicks,
-broadcast input, or automate gameplay. It does not change Windows' global
-active-window tracking setting.
+broadcast input, or automate gameplay. For mouse focus it switches on Windows'
+active window tracking only while the pointer is over a managed WoW window, never
+saves that change to your profile, and restores your own setting everywhere else.
 
 ## Quick start
 
@@ -51,8 +52,8 @@ cd WoWWindowKit
 The portable build includes the runtime. If you already have a built `dist` folder,
 start with the launchers below.
 
-1. **Exit OpenMultiBoxing / WowOpenBox if it is running.** Its normal exit also
-   disables its Windows-wide mouse tracking, so the two apps do not compete.
+1. **Exit OpenMultiBoxing / WowOpenBox if it is running.** Both apps drive Windows'
+   active window tracking for mouse focus and would compete for it.
 2. **Choose your party size.** Run `Start 5-man.cmd` or `Start 10-man.cmd` in `dist`.
 3. **Start your WoW clients normally.** They attach automatically in process-start
    order. Existing `WoW 1` … `WoW 10` titles retain their numbers where possible.
@@ -89,6 +90,16 @@ Hover focus works only over an exposed, managed WoW window. Move over the deskto
 another app, or a window covering WoW and focus changes stop. Return to a managed
 game window and they resume.
 
+Like WowOpenBox, focus switching uses Windows' own *active window tracking*:
+Windows changes focus while it handles the mouse movement, so a key you hold while
+sweeping across clients reaches each client as soon as the pointer enters it.
+The app turns tracking on only while the pointer is over an exposed managed WoW
+window (no delay, windows are not raised) and restores your own setting
+elsewhere. The change is memory-only: exiting, logging off or rebooting restores
+it, and if the app is killed while tracking is on, the next start repairs it. If
+Windows has not switched to the hovered client within 150 ms, the app switches
+focus itself.
+
 Focus pauses while a mouse button is held or Settings is open. After a hotkey
 swap, a stationary pointer leaves the chosen account active; the first mouse
 movement resumes hover focus. Mouse transitions are event-driven, with a periodic
@@ -104,7 +115,7 @@ same core actions.
 | Action | Where / how |
 | --- | --- |
 | Bring an account to main | F1–F5 / F1–F10 while a managed WoW window is active, or **Make main** in controls |
-| Toggle mouse focus | Ctrl+Shift+F while WoW is active, or the controls / tray toggle |
+| Toggle mouse focus | Ctrl+Shift+F by default (changeable in Settings) while WoW is active, or the controls / tray toggle |
 | Assign a running client | Select a slot and window, then **Catch / assign** |
 | Release a client | **Forget** restores its original borders and position |
 | Change profile, pause, or reapply layout | Controls or tray menu |
@@ -117,9 +128,24 @@ Use `WoWWindowKit.exe --tray` on first launch to start hidden. Only one instance
 runs per Windows session: another profile launcher switches the existing instance,
 and another Settings launch opens its editor.
 
-Swap hotkeys can be edited in Settings: use F1–F12, optionally with Ctrl, Shift,
-or Alt. Unbound combinations such as Ctrl+F1 have no special behavior. Bound
-keys pass through normally when another application is active.
+### Changing hotkeys
+
+In **Settings & layout**, select a cell in the *Account swap key* column and press
+the new key combination. To change the mouse-focus toggle, click the *Mouse focus
+toggle key* box and press the new combination. Nothing is typed; the key you press
+is recorded. Changes apply when you click **Save & apply**.
+
+- Usable on their own, with any of Ctrl, Shift and Alt: F1–F24, numpad keys,
+  Insert, Delete, Home, End, Page Up, Page Down, Pause and Scroll Lock.
+- Letters, digits, punctuation, Space and arrows need Ctrl or Alt (for example
+  **Ctrl+1** or **Alt+Q**), so chat typing and movement keep working.
+- Pressing a key that another slot already uses swaps the two slots' keys. A
+  swap key and the toggle key can't be the same.
+- Tab, Enter, Escape and the plain arrow keys keep their usual meaning in the dialog.
+
+Each profile (5-man, 10-man) has its own swap keys. A bound key is consumed only
+while a managed WoW window is active; elsewhere it passes through unchanged.
+
 
 ### Replacing and reassigning clients
 
@@ -167,8 +193,8 @@ name or embedded product metadata separately from the configured app name.
 | **Settings fail to load** | Inspect `settings.json` and the previous save in `settings.json.bak`; check `app.log` beside the executable. |
 | **Windows remain borderless after a crash** | Relaunch the app and exit normally, or restart the game clients. |
 
-Foreground activation uses Windows APIs, with a temporary input-thread attachment
-fallback. Threads are detached immediately afterward, and hung windows are skipped.
+Mouse focus uses Windows' active window tracking. Keyboard swaps and the hover
+fallback use foreground activation with a temporary input-thread attachment. Threads are detached immediately afterward, and hung windows are skipped.
 Actual focus behavior and rendering after a resize depend on the game and the
 Windows session.
 

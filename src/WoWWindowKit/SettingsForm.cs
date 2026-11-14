@@ -11,7 +11,10 @@ internal sealed class SettingsForm : Form
     private readonly ComboBox profiles = new() { Name = "profiles", DropDownStyle = ComboBoxStyle.DropDownList, Width = 150 };
     private readonly CheckBox mouseFocus = new() { Text = "Focus follows mouse over WoW", AutoSize = true };
     private readonly CheckBox borderless = new() { Text = "Borderless windows", AutoSize = true };
-    private readonly DataGridView grid = new() { Name = "layout", Dock = DockStyle.Fill, AutoGenerateColumns = false, AllowUserToAddRows = false, AllowUserToDeleteRows = false, RowHeadersVisible = false, AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill, BackgroundColor = SystemColors.Window, BorderStyle = BorderStyle.FixedSingle };
+    private readonly HotkeyGrid grid = new() { Name = "layout", Dock = DockStyle.Fill, AutoGenerateColumns = false, AllowUserToAddRows = false, AllowUserToDeleteRows = false, RowHeadersVisible = false, AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill, BackgroundColor = SystemColors.Window, BorderStyle = BorderStyle.FixedSingle };
+    private readonly HotkeyBox toggleKey = new() { Name = "toggleKey", Width = 150, ReadOnly = true };
+    private readonly Label hint = new() { Name = "hint", Dock = DockStyle.Fill, ForeColor = SystemColors.GrayText, TextAlign = ContentAlignment.MiddleLeft };
+    private const string DefaultHint = "To change a key, select it and press the new combination. Mouse focus and hotkeys pause while this window is open.";
     private readonly FlowLayoutPanel assignments = new() { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = false, AutoScroll = true };
     private readonly LayoutPreview preview;
     private bool loading;
@@ -39,18 +42,23 @@ internal sealed class SettingsForm : Form
         root.Controls.Add(top, 0, 0);
         var options = new FlowLayoutPanel { Dock = DockStyle.Fill };
         mouseFocus.Checked = draft.MouseFocus; borderless.Checked = draft.Borderless;
-        options.Controls.AddRange([mouseFocus, borderless]); root.Controls.Add(options, 0, 1);
+        toggleKey.Text = draft.MouseToggleHotkey;
+        toggleKey.HotkeyPressed = CaptureToggleKey;
+        options.Controls.AddRange([mouseFocus, borderless, new Label { Text = "   Mouse focus toggle key", AutoSize = true, Padding = new Padding(0, 5, 0, 0) }, toggleKey]);
+        root.Controls.Add(options, 0, 1);
         preview = new LayoutPreview(() => draft.Current) { Dock = DockStyle.Fill }; root.Controls.Add(preview, 0, 2);
         grid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Slot", Name = "Slot", ReadOnly = true, FillWeight = 45 });
         foreach (var name in new[] { "X", "Y", "Width", "Height", "Hotkey" })
-            grid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = name == "Hotkey" ? "Account swap key" : name, DataPropertyName = name, Name = name, FillWeight = name == "Hotkey" ? 150 : 80 });
+            // Swap keys are recorded by pressing them, not typed (HotkeyGrid).
+            grid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = name == "Hotkey" ? "Account swap key (press to set)" : name, DataPropertyName = name, Name = name, FillWeight = name == "Hotkey" ? 150 : 80, ReadOnly = name == "Hotkey" });
+        grid.HotkeyPressed = CaptureSlotKey;
         grid.DataError += (_, e) => { e.ThrowException = false; DarkTheme.Message(this, "Use whole numbers for coordinates and sizes.", Text); };
         grid.CellValueChanged += (_, _) => preview.Invalidate();
         grid.DataBindingComplete += (_, _) => { foreach (DataGridViewRow row in grid.Rows) row.Cells[0].Value = row.Index + 1; };
         root.Controls.Add(grid, 0, 3);
         root.Controls.Add(new Label { Text = "Account assignment — numbers stay with accounts when swapping", AutoSize = true, Padding = new Padding(0, 8, 0, 0) }, 0, 4);
         root.Controls.Add(assignments, 0, 5);
-        root.Controls.Add(new Label { Text = "Mouse focus and hotkeys pause while this window is open. Changes apply when saved.", Dock = DockStyle.Fill, ForeColor = SystemColors.GrayText, TextAlign = ContentAlignment.MiddleLeft }, 0, 6);
+        ShowHint(DefaultHint, false); root.Controls.Add(hint, 0, 6);
         var buttons = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.RightToLeft };
         var apply = new Button { Name = "save", Text = "Save && apply", AutoSize = true };
         var cancel = new Button { Text = "Cancel", AutoSize = true, DialogResult = DialogResult.Cancel };
@@ -63,6 +71,50 @@ internal sealed class SettingsForm : Form
             draft.ActiveProfile = (string)profiles.SelectedItem!; BindLayout();
         };
         BindLayout(); DarkTheme.Apply(this);
+    }
+    private void ShowHint(string text, bool warning)
+    {
+        hint.Text = text;
+        hint.ForeColor = warning ? Color.FromArgb(240, 180, 90) : SystemColors.GrayText;
+    }
+    // Plain navigation keys keep their normal meaning in the grid and dialog.
+    private static bool IsNavigation(KeyBinding binding) =>
+        !binding.Ctrl && !binding.Alt && (Keys)binding.Key is Keys.Tab or Keys.Enter or Keys.Escape or Keys.Left or Keys.Up or Keys.Right or Keys.Down;
+    internal bool CaptureSlotKey(int row, KeyBinding binding)
+    {
+        if (binding.Problem() is { } problem)
+        {
+            if (IsNavigation(binding)) return false;
+            ShowHint($"{binding} can't be used: {problem}", true); return true;
+        }
+        if (binding == KeyBinding.Parse(draft.MouseToggleHotkey)) { ShowHint($"{binding} already toggles mouse focus.", true); return true; }
+        var slots = draft.Current.Slots;
+        var previous = slots[row].Hotkey;
+        var message = $"Slot {row + 1} now swaps with {binding}.";
+        for (var other = 0; other < slots.Count; other++)
+        {
+            // Taking another slot's key gives that slot this slot's old key, so the profile stays valid.
+            if (other == row || KeyBinding.Parse(slots[other].Hotkey) != binding) continue;
+            slots[other].Hotkey = previous;
+            message += $" Slot {other + 1} takes {previous}.";
+            ((BindingList<Slot>)grid.DataSource!).ResetItem(other);
+        }
+        slots[row].Hotkey = binding.ToString();
+        ((BindingList<Slot>)grid.DataSource!).ResetItem(row);
+        ShowHint(message, false); return true;
+    }
+    internal bool CaptureToggleKey(KeyBinding binding)
+    {
+        if (binding.Problem() is { } problem)
+        {
+            if (IsNavigation(binding)) return false;
+            ShowHint($"{binding} can't be used: {problem}", true); return true;
+        }
+        var used = draft.Profiles.SelectMany(p => p.Slots.Select((slot, i) => (p.Name, Number: i + 1, slot.Hotkey)))
+            .FirstOrDefault(x => KeyBinding.Parse(x.Hotkey) == binding);
+        if (used.Hotkey != null) { ShowHint($"{binding} already swaps to slot {used.Number} in {used.Name}.", true); return true; }
+        draft.MouseToggleHotkey = toggleKey.Text = binding.ToString();
+        ShowHint($"Mouse focus now toggles with {binding}.", false); return true;
     }
     private void BindLayout()
     {
@@ -105,6 +157,24 @@ internal sealed class SettingsForm : Form
         catch (Exception ex) { DarkTheme.Message(this, ex.Message, Text); }
     }
     private sealed record WindowChoice(ManagedWindow Window) { public override string ToString() => $"PID {Window.Pid} · {Window.Title}"; }
+}
+
+/// <summary>Records a key combination when the swap-key column is selected.</summary>
+internal sealed class HotkeyGrid : DataGridView
+{
+    internal Func<int, KeyBinding, bool>? HotkeyPressed;
+    // ProcessCmdKey runs before grid navigation, dialog keys, mnemonics and F1 help.
+    protected override bool ProcessCmdKey(ref Message msg, Keys keyData) =>
+        CurrentCell is { OwningColumn.Name: "Hotkey" } cell && !IsCurrentCellInEditMode && KeyBinding.TryFromKeys(keyData, out var binding) && HotkeyPressed?.Invoke(cell.RowIndex, binding) == true
+        || base.ProcessCmdKey(ref msg, keyData);
+}
+
+/// <summary>Read-only box that records the key combination pressed while it has focus.</summary>
+internal sealed class HotkeyBox : TextBox
+{
+    internal Func<KeyBinding, bool>? HotkeyPressed;
+    protected override bool ProcessCmdKey(ref Message msg, Keys keyData) =>
+        KeyBinding.TryFromKeys(keyData, out var binding) && HotkeyPressed?.Invoke(binding) == true || base.ProcessCmdKey(ref msg, keyData);
 }
 
 internal sealed class LayoutPreview(Func<LayoutProfile> profile) : Control

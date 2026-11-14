@@ -15,13 +15,13 @@ internal sealed class ManagedWindow
 }
 
 /// <summary>Immutable state read by the input-hook and focus threads without touching UI-owned collections.</summary>
-internal sealed record InputState(IReadOnlyDictionary<nint, int> Managed, IReadOnlyDictionary<KeyBinding, (int Number, nint Handle)> SwapKeys, bool Editing, bool Paused, bool MouseFocus);
+internal sealed record InputState(IReadOnlyDictionary<nint, int> Managed, IReadOnlyDictionary<nint, int> Numbers, IReadOnlyDictionary<KeyBinding, (int Number, nint Handle)> SwapKeys, KeyBinding Toggle, bool Editing, bool Paused, bool MouseFocus);
 
 internal sealed class WindowManager : IDisposable
 {
     private AppSettings settings;
     private bool paused, editing;
-    private volatile InputState input = new(new Dictionary<nint, int>(), new Dictionary<KeyBinding, (int, nint)>(), false, false, false);
+    private volatile InputState input = new(new Dictionary<nint, int>(), new Dictionary<nint, int>(), new Dictionary<KeyBinding, (int, nint)>(), default, false, false, false);
     private volatile bool focusRefused;
     private string status = "Waiting for WoW windows";
     private readonly object focusLock = new();
@@ -40,6 +40,12 @@ internal sealed class WindowManager : IDisposable
     internal Func<Native.Point?> ReadPointer = static () => Native.GetCursorPos(out var point) ? point : null;
     internal Func<bool> MouseInputHeld = static () => Native.Down(1) || Native.Down(2) || Native.Down(4) || Native.Down(5) || Native.Down(6);
     internal Func<nint, bool> ActivateWindow = Native.Activate;
+    /// <summary>Turns Windows' active window tracking on or off; null leaves the system untouched (tests).</summary>
+    internal Action<bool>? SystemTracking;
+    /// <summary>How long Windows gets to activate a hovered window before the app does it itself.</summary>
+    internal int TrackingGraceMs = 150;
+    private volatile bool trackingOn;
+    private long hoverSince;
     private Native.Point? mouseAtSwap;
     private nint lastHover;
     private long retryFocusAfter;
@@ -54,13 +60,15 @@ internal sealed class WindowManager : IDisposable
     {
         var slots = Settings.Current.Slots;
         var managed = new Dictionary<nint, int>();
+        var numbers = new Dictionary<nint, int>();
         var keys = new Dictionary<KeyBinding, (int, nint)>();
         foreach (var pair in Accounts.Where(p => p.Key <= slots.Count))
         {
             managed[pair.Value.Handle] = pair.Value.Pid;
+            numbers[pair.Value.Handle] = pair.Key;
             keys[KeyBinding.Parse(slots[pair.Key - 1].Hotkey)] = (pair.Key, pair.Value.Handle);
         }
-        input = new InputState(managed, keys, editing, paused, Settings.MouseFocus);
+        input = new InputState(managed, numbers, keys, KeyBinding.Parse(Settings.MouseToggleHotkey), editing, paused, Settings.MouseFocus);
     }
 
     internal IReadOnlyList<ManagedWindow> Discover()
@@ -261,6 +269,20 @@ internal sealed class WindowManager : IDisposable
         }
         draft.Validate(); Settings = draft;
     }
+    /// <summary>
+    /// Runs in the low-level mouse hook, before Windows processes the movement: Windows'
+    /// own tracking is on only while the new position is over an exposed managed window,
+    /// so it can never activate another app.
+    /// </summary>
+    internal void PointerMoved(Native.Point point)
+    {
+        if (SystemTracking == null) return;
+        var state = input;
+        var on = state.MouseFocus && !state.Paused && !state.Editing && !MouseInputHeld() && HoverTarget(point) != 0;
+        if (on == trackingOn) return;
+        SystemTracking(on);
+        trackingOn = on;
+    }
     /// <summary>Hover-focus decision. Thread-safe; production calls it on the focus worker so slow activation never delays input hooks.</summary>
     internal void MouseTick()
     {
@@ -278,7 +300,10 @@ internal sealed class WindowManager : IDisposable
             target = HoverTarget(point);
             if (target == 0) { MouseDecision = "Outside"; lastHover = 0; return; }
             focused = Native.GetForegroundWindow() == target;
+            if (target != lastHover) hoverSince = Environment.TickCount64;
             if (focused) MouseDecision = "Already focused";
+            // Windows' tracking normally activates the window first; step in only if it did not.
+            else if (trackingOn && Environment.TickCount64 - hoverSince < TrackingGraceMs) { MouseDecision = "Windows tracking"; lastHover = target; return; }
             else if (target == lastHover && Environment.TickCount64 < retryFocusAfter) { MouseDecision = "Throttled"; return; }
             else
             {
@@ -287,8 +312,9 @@ internal sealed class WindowManager : IDisposable
             }
             lastHover = target;
         }
-        if (focused) SetFocusRefused(false);
-        else Activate(target);
+        if (focused) { SetFocusRefused(false); return; }
+        if (trackingOn) Program.LogLine($"Windows tracking did not activate account {(input.Numbers.TryGetValue(target, out var n) ? n : 0)} within {TrackingGraceMs} ms; activating directly.");
+        Activate(target);
     }
     private void Activate(nint target)
     {
@@ -297,7 +323,12 @@ internal sealed class WindowManager : IDisposable
         var activated = ActivateWindow(target);
         // Timing evidence for clients that answer focus slowly; normal activation stays silent.
         if (timer.ElapsedMilliseconds >= 40)
-            Program.LogLine($"Focus {(activated ? "took" : "failed after")} {timer.ElapsedMilliseconds} ms: \"{Native.Title(target)}\"");
+        {
+            var state = input;
+            var account = state.Numbers.TryGetValue(target, out var number) ? $"account {number}" : "unassigned window";
+            var pid = state.Managed.TryGetValue(target, out var id) ? id : 0;
+            Program.LogLine($"Focus {(activated ? "took" : "failed after")} {timer.ElapsedMilliseconds} ms: {account}, PID {pid}, \"{Native.Title(target)}\"");
+        }
         SetFocusRefused(!activated);
     }
     private void SetFocusRefused(bool refused)

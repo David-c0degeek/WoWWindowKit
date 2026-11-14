@@ -20,6 +20,7 @@ internal static class Native
         public Rect Normal;
     }
     [StructLayout(LayoutKind.Sequential)] internal struct KeyData { public uint Key, ScanCode, Flags, Time; public nuint Extra; }
+    [StructLayout(LayoutKind.Sequential)] internal struct MouseData { public Point Point; public uint MouseInfo, Flags, Time; public nuint Extra; }
     [StructLayout(LayoutKind.Sequential)] internal struct Message { public nint Window; public uint Id; public nint WParam, LParam; public uint Time; public Point Point; }
     [DllImport("user32.dll")] internal static extern bool EnumWindows(EnumProc callback, nint data);
     [DllImport("user32.dll")] internal static extern bool IsWindow(nint window);
@@ -44,6 +45,8 @@ internal static class Native
     [DllImport("kernel32.dll")] internal static extern bool CloseHandle(nint handle);
     [DllImport("kernel32.dll")] internal static extern bool GetProcessTimes(nint process, out long created, out long exited, out long kernel, out long user);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] internal static extern bool QueryFullProcessImageName(nint process, uint flags, StringBuilder name, ref int size);
+    [DllImport("user32.dll")] internal static extern bool SystemParametersInfo(uint action, uint param, nint value, uint winIni);
+    [DllImport("user32.dll")] internal static extern bool SystemParametersInfo(uint action, uint param, out int value, uint winIni);
     [DllImport("user32.dll")] internal static extern int GetMessage(out Message message, nint window, uint min, uint max);
     [DllImport("user32.dll")] internal static extern bool PeekMessage(out Message message, nint window, uint min, uint max, uint remove);
     [DllImport("user32.dll")] internal static extern bool PostThreadMessage(uint thread, uint message, nint wp, nint lp);

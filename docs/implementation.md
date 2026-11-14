@@ -1,5 +1,67 @@
 # Implementation decisions and pre-mortem
 
+## Mouse focus via Windows active window tracking (v1.0.6), PM-2 reversed
+
+Decision (user, 2026-11-14): reverse PM-2's "must not modify global Windows
+tracking" and switch focus the way WowOpenBox did.
+
+Why: the v1.0.4 log recorded 124 hover activations of 40 ms or more (SetForegroundWindow
+plus input-queue attachment): median 182 ms, 90th percentile 423 ms, max 794 ms,
+with vsync on and five clients. Until activation finishes, held keys go to the
+previous window. Windows' active window tracking activates the window under the
+pointer inside its own input processing, so input that follows the movement is
+already routed to the new window, with no foreground-lock workaround.
+
+Design:
+- The low-level mouse hook (dedicated thread) evaluates each new pointer position
+  before Windows processes it. Tracking is on only when that position is over an
+  exposed managed window (WindowFromPoint + GA_ROOT + snapshot, as before) and
+  mouse focus is enabled, not paused, not editing Settings, and no mouse button is
+  held. Because tracking is switched off before Windows handles a move onto another
+  app, tracking never activates a non-game window; PM-2's boundary still holds.
+- Values while on: tracking on, delay 0 ms, no Z-order raise. Off restores the
+  user's original three values (a user who already uses tracking keeps it).
+- SystemParametersInfo is called without SPIF_UPDATEINIFILE: memory only, never
+  written to the profile, so logoff or reboot always restores the user's setting.
+- A marker file (window-tracking.restore) records the original values once tracking
+  has been enabled; the next start re-applies them after a crash. Exit, ProcessExit
+  and unhandled exceptions restore as well.
+- The app's own activation remains as fallback: if the hovered client is still not
+  foreground 150 ms after the pointer entered it with tracking on, the focus worker
+  activates it and logs that Windows did not.
+- Still no input injection and no click or key broadcasting.
+
+Verification: 120 integration checks pass, covering the hook gate (on over managed
+windows; off outside and during pause, Settings or held buttons; one system call per
+transition), the grace period before fallback, tracking values and marker handling,
+crash repair, and restore on exit. An end-to-end test with the real system setting
+(Windows focuses a hovered mock client while the app's own activation is disabled)
+runs only with the tray app closed.
+
+## Configurable hotkeys (v1.0.5)
+
+Swap keys were editable only as typed text and limited to F1–F12; the mouse-focus
+toggle was fixed at Ctrl+Shift+F. Settings now records keys by pressing them
+(swap-key column and a toggle-key box), and `MouseToggleHotkey` is a saved setting
+(older settings files keep the Ctrl+Shift+F default).
+
+Allowed keys: F1–F24, numpad, Insert/Delete/Home/End/Page Up/Page Down, Pause and
+Scroll Lock with any modifiers. Letters, digits, punctuation, Space and arrows
+require Ctrl or Alt, because the hook consumes bound keys while WoW is active and
+plain typing or movement keys would break chat and movement. Lone modifiers and
+the Windows keys are never bindings. Taking another slot's key swaps the two, so a
+profile never becomes invalid mid-edit. Validation rejects a toggle key that equals
+any profile's swap key. Hand-edited names are case-insensitive and are written back
+in a canonical form.
+
+The keyboard hook now sees every key, so its first step is one dictionary lookup in
+the published snapshot; unbound keys return without further work.
+
+Verification: 110 integration checks pass, adding parsing/round-trip, rejected
+forms (plain letters, numeric names, modifier-only), toggle/swap conflict, custom
+numpad, Alt+digit and multi-modifier swap and toggle routing (old keys pass through), and recording through the
+grid's real key path including the swap-on-conflict rule and navigation passthrough.
+
 ## Input latency under hover focus (v1.0.4)
 
 Observed by user: holding a key while sweeping across clients, the key often

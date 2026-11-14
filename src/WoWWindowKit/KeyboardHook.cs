@@ -35,10 +35,11 @@ internal sealed class KeyboardHook : IDisposable
     {
         if (!down) return swallowed.Remove(binding.Key);
         if (swallowed.Contains(binding.Key)) return true; // suppress repeats and the matching key-up
-        if (binding.Key != (int)Keys.F && (binding.Key < (int)Keys.F1 || binding.Key > (int)Keys.F12)) return false;
         var state = manager.Input;
+        // Every keystroke passes through here: ordinary keys leave after one lookup.
+        if (KeyBinding.IsModifier(binding.Key) || (binding != state.Toggle && !state.SwapKeys.ContainsKey(binding))) return false;
         if (state.Editing || windowsKey || !manager.IsManaged(foreground)) return false;
-        if (binding == new KeyBinding((int)Keys.F, true, true, false))
+        if (binding == state.Toggle)
         {
             swallowed.Add(binding.Key); toggleMouse(); return true;
         }

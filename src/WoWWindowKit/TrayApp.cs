@@ -22,6 +22,7 @@ internal sealed class TrayApp : ApplicationContext
     private readonly System.Windows.Forms.Timer timer = new() { Interval = 1000 };
     private readonly HookThread hooks;
     private readonly FocusWorker focus;
+    private readonly WindowTracking tracking;
     private readonly ControlWindow commands = new();
     private readonly Control dispatcher = new();
     private readonly ControlsForm controls;
@@ -36,11 +37,15 @@ internal sealed class TrayApp : ApplicationContext
         tray = new NotifyIcon { Icon = SystemIcons.Application, ContextMenuStrip = menu, Visible = true };
         controls = new ControlsForm(manager, Safe, SetProfile, ToggleMouse, TogglePause, ShowSettings, ExitThread);
         focus = new FocusWorker(manager.MouseTick, settings.MousePollMs);
+        tracking = new WindowTracking(Path.Combine(AppContext.BaseDirectory, "window-tracking.restore"));
+        AppDomain.CurrentDomain.ProcessExit += (_, _) => tracking.Dispose();
+        AppDomain.CurrentDomain.UnhandledException += (_, _) => tracking.Dispose();
+        manager.SystemTracking = tracking.Set;
         // Hook callbacks only read a snapshot, post to the UI thread, or wake the focus worker.
         hooks = new HookThread(installed =>
         {
             installed.Add(new KeyboardHook(manager, account => Post(() => manager.Swap(account)), () => Post(ToggleMouse)));
-            installed.Add(new MouseHook(focus.Wake));
+            installed.Add(new MouseHook(point => { manager.PointerMoved(point); focus.Wake(); }));
         });
         manager.Changed = UpdateTray;
         manager.FocusWarningChanged = () => Post(UpdateTray);
@@ -85,7 +90,7 @@ internal sealed class TrayApp : ApplicationContext
         menu.Items.Add(new ToolStripSeparator());
         WindowMenus.AddTo(menu, manager, Safe, editor == null);
         menu.Items.Add(new ToolStripSeparator());
-        var mouse = new ToolStripMenuItem("Focus follows mouse  (Ctrl+Shift+F)") { Checked = manager.Settings.MouseFocus };
+        var mouse = new ToolStripMenuItem($"Focus follows mouse  ({manager.Settings.MouseToggleHotkey})") { Checked = manager.Settings.MouseFocus };
         mouse.Click += (_, _) => Safe(ToggleMouse); menu.Items.Add(mouse);
         var pause = new ToolStripMenuItem("Pause app") { Checked = manager.Paused };
         pause.Click += (_, _) => Safe(TogglePause); menu.Items.Add(pause);
@@ -168,7 +173,7 @@ internal sealed class TrayApp : ApplicationContext
         if (!disposed)
         {
             // Stop input threads before windows are restored so nothing re-activates them.
-            disposed = true; hooks.Dispose(); focus.Dispose(); editor?.Close(); controls.Dispose(); timer.Stop(); manager.Dispose();
+            disposed = true; hooks.Dispose(); focus.Dispose(); tracking.Dispose(); editor?.Close(); controls.Dispose(); timer.Stop(); manager.Dispose();
             tray.Visible = false; tray.Dispose(); timer.Dispose(); menu.Dispose(); commands.Dispose(); dispatcher.Dispose();
         }
         base.ExitThreadCore();

@@ -64,6 +64,15 @@ internal static class SelfTest
             var invalid = imported.Copy(); invalid.Current.Slots[1].Hotkey = "F1";
             var rejected = false; try { invalid.Validate(); } catch (InvalidDataException) { rejected = true; }
             Check(rejected, "Duplicate hotkeys rejected");
+            Check(KeyBinding.Parse("Ctrl+1") == new KeyBinding((int)Keys.D1, true, false, false) && KeyBinding.Parse("NumPad3").Key == (int)Keys.NumPad3
+                && KeyBinding.Parse("shift+F13").Shift && KeyBinding.Parse("Alt+Q").ToString() == "Alt+Q" && KeyBinding.Parse("Ctrl+Shift+1").ToString() == "Ctrl+Shift+1", "Broader hotkeys parse and round-trip");
+            var unusable = 0;
+            foreach (var text in new[] { "1", "Q", "Shift+Q", "Space", "Escape", "Ctrl+LWin", "65", "Ctrl+A, B", "Ctrl+ShiftKey", "Ctrl+" })
+                try { KeyBinding.Parse(text); } catch (InvalidDataException) { unusable++; }
+            Check(unusable == 10, "Typing, movement, numeric and modifier-only hotkeys rejected");
+            invalid = imported.Copy(); invalid.MouseToggleHotkey = "F2";
+            rejected = false; try { invalid.Validate(); } catch (InvalidDataException) { rejected = true; }
+            Check(rejected, "Mouse-focus toggle cannot reuse a swap key");
             invalid = imported.Copy(); invalid.Current.Slots[0].Height = 0;
             rejected = false; try { invalid.Validate(); } catch (InvalidDataException) { rejected = true; }
             Check(rejected, "Invalid geometry rejected");
@@ -127,6 +136,21 @@ internal static class SelfTest
                 var routeThread = new Thread(() => routed = router.HandleKey(new((int)Keys.F3, false, false, false), true, originalHandle) && swapCalled == 3);
                 routeThread.Start(); routeThread.Join();
                 Check(routed, "F3 routes from a non-UI hook thread");
+                var customized = manager.Settings.Copy();
+                customized.Current.Slots[2].Hotkey = "NumPad3"; customized.Current.Slots[1].Hotkey = "alt+2"; customized.MouseToggleHotkey = "Alt+M";
+                customized.Validate(); manager.Settings = customized;
+                router.HandleKey(new((int)Keys.F3, false, false, false), false, 0); // release keys held by earlier checks
+                router.HandleKey(new((int)Keys.F, true, true, false), false, 0);
+                Check(router.HandleKey(new((int)Keys.NumPad3, false, false, false), true, originalHandle) && swapCalled == 3, "Custom numpad swap key routes");
+                Check(!router.HandleKey(new((int)Keys.F3, false, false, false), true, originalHandle), "Replaced swap key passes through");
+                Check(router.HandleKey(new((int)Keys.D2, false, false, true), true, originalHandle) && swapCalled == 2, "Alt+2 combination swap key routes");
+                router.HandleKey(new((int)Keys.D2, false, false, true), false, 0);
+                Check(!router.HandleKey(new((int)Keys.D2, false, false, false), true, originalHandle) && !router.HandleKey(new((int)Keys.D2, true, false, false), true, originalHandle), "Plain 2 and Ctrl+2 pass through when only Alt+2 is bound");
+                Check(router.HandleKey(new((int)Keys.M, false, false, true), true, originalHandle) && toggled == 2, "Custom mouse-focus toggle key");
+                Check(!router.HandleKey(new((int)Keys.F, true, true, false), true, originalHandle), "Old toggle key passes through once changed");
+                router.HandleKey(new((int)Keys.M, false, false, true), false, 0);
+                Check(!router.HandleKey(new((int)Keys.M, false, false, false), true, originalHandle), "Plain letters always pass through");
+                manager.Settings = imported;
             }
             var scanTimer = Stopwatch.StartNew();
             for (var i = 0; i < 10; i++) manager.Rescan();
@@ -139,6 +163,50 @@ internal static class SelfTest
             var realPointer = manager.ReadPointer;
             var simulatedPointer = point;
             manager.ReadPointer = () => simulatedPointer;
+            {
+                // Windows' tracking is gated in the mouse hook; a fake records what the system would get.
+                var requested = new List<bool>();
+                manager.SystemTracking = requested.Add;
+                manager.PointerMoved(point);
+                manager.PointerMoved(new Native.Point(point.X + 1, point.Y));
+                Check(requested.SequenceEqual([true]), "Windows tracking turns on once over an exposed managed window");
+                manager.PointerMoved(new Native.Point(-30000, -30000));
+                Check(requested.SequenceEqual([true, false]), "Windows tracking turns off outside managed windows");
+                manager.Paused = true; manager.PointerMoved(point); manager.Paused = false;
+                manager.Editing = true; manager.PointerMoved(point); manager.Editing = false;
+                var heldInput = manager.MouseInputHeld; manager.MouseInputHeld = static () => true; manager.PointerMoved(point); manager.MouseInputHeld = heldInput;
+                Check(requested.SequenceEqual([true, false]), "Pause, Settings and held mouse buttons keep Windows tracking off");
+                manager.PointerMoved(point);
+                var activations = 0; var activate = manager.ActivateWindow;
+                manager.ActivateWindow = _ => { activations++; return true; };
+                manager.TrackingGraceMs = 60;
+                if (Native.GetForegroundWindow() != first)
+                {
+                    manager.MouseTick();
+                    Check(manager.MouseDecision == "Windows tracking" && activations == 0, "App leaves activation to Windows while its tracking is on");
+                    Thread.Sleep(80); manager.MouseTick();
+                    Check(activations == 1, "App activates directly if Windows' tracking did not within the grace period");
+                }
+                manager.PointerMoved(new Native.Point(-30000, -30000));
+                manager.SystemTracking = null; manager.ActivateWindow = activate; manager.TrackingGraceMs = 150;
+            }
+            {
+                var markerPath = Path.Combine(temporary, "tracking.restore");
+                var system = new WindowTracking.Values(0, 1, 200);
+                var applied = 0;
+                var crashed = new WindowTracking(markerPath, () => system, v => { system = v; applied++; });
+                crashed.Set(true); crashed.Set(true);
+                Check(system == new WindowTracking.Values(1, 0, 0) && applied == 1 && File.Exists(markerPath), "Enabling tracking applies instant, no-raise values once and records the originals");
+                crashed.Set(false);
+                Check(system == new WindowTracking.Values(0, 1, 200), "Disabling restores the user's original tracking values");
+                crashed.Set(true); // simulate a crash: never disposed
+                var recovered = new WindowTracking(markerPath, () => system, v => system = v);
+                Check(system == new WindowTracking.Values(0, 1, 200) && recovered.Original == system && !File.Exists(markerPath), "Next start repairs tracking left on by a crash");
+                recovered.Set(true); recovered.Dispose();
+                Check(system == new WindowTracking.Values(0, 1, 200) && !File.Exists(markerPath) && !recovered.Enabled, "Exit restores tracking and removes the marker");
+                recovered.Set(true);
+                Check(system == new WindowTracking.Values(0, 1, 200), "Tracking stays off after exit");
+            }
             manager.Swap(2); Pump(); manager.MouseTick();
             Check(manager.MouseDecision == "Stationary after swap", "Stationary pointer does not undo a keyboard swap");
             var movement = Stopwatch.StartNew();
@@ -283,11 +351,35 @@ internal static class SelfTest
                 profilePicker.SelectedItem = "10-man"; Pump();
                 var layout = (DataGridView)form.Controls.Find("layout", true).Single();
                 Check(layout.Rows.Count == 10, "Layout editor switches to ten slots");
+                // Drive the recorder through the grid's real key path.
+                layout.CurrentCell = layout.Rows[0].Cells["Hotkey"];
+                var press = typeof(HotkeyGrid).GetMethod("ProcessCmdKey", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+                var keyMessage = new Message();
+                Check((bool)press.Invoke(layout, [keyMessage, Keys.F2])! && (string?)layout.Rows[0].Cells["Hotkey"].Value == "F2" && (string?)layout.Rows[1].Cells["Hotkey"].Value == "F1",
+                    "Pressing another slot's key records it and swaps the two keys");
+                layout.CurrentCell = layout.Rows[2].Cells["Hotkey"];
+                press.Invoke(layout, [keyMessage, Keys.Control | Keys.D3]);
+                Check((string?)layout.Rows[2].Cells["Hotkey"].Value == "Ctrl+3", "Ctrl+digit recorded as a swap key");
+                layout.CurrentCell = layout.Rows[3].Cells["Hotkey"];
+                press.Invoke(layout, [keyMessage, Keys.Alt | Keys.D1]);
+                Check((string?)layout.Rows[3].Cells["Hotkey"].Value == "Alt+1", "Alt+1 recorded as a swap key");
+                press.Invoke(layout, [keyMessage, Keys.Control | Keys.Shift | Keys.F4]);
+                Check((string?)layout.Rows[3].Cells["Hotkey"].Value == "Ctrl+Shift+F4", "Multi-modifier combination recorded");
+                press.Invoke(layout, [keyMessage, Keys.Alt | Keys.D1]);
+                layout.CurrentCell = layout.Rows[2].Cells["Hotkey"];
+                press.Invoke(layout, [keyMessage, Keys.Q]);
+                Check((string?)layout.Rows[2].Cells["Hotkey"].Value == "Ctrl+3" && ((Label)form.Controls.Find("hint", true).Single()).Text.Contains("need Ctrl or Alt"), "Plain letter refused with an explanation");
+                Check(!(bool)press.Invoke(layout, [keyMessage, Keys.Down])!, "Arrow keys still navigate the grid");
+                var toggleBox = (HotkeyBox)form.Controls.Find("toggleKey", true).Single();
+                Check(toggleBox.HotkeyPressed!(KeyBinding.Parse("F1")) && toggleBox.Text == "Ctrl+Shift+F", "Toggle key refuses a swap key");
+                toggleBox.HotkeyPressed!(KeyBinding.Parse("NumPad0"));
                 using var bitmap = new Bitmap(form.Width, form.Height);
                 form.DrawToBitmap(bitmap, new Rectangle(Point.Empty, form.Size));
                 bitmap.Save(Path.Combine(AppContext.BaseDirectory, "settings-preview.png"));
                 ((Button)form.Controls.Find("save", true).Single()).PerformClick(); Pump();
                 Check(edited?.DisplayName == "Notepad++" && edited.ActiveProfile == "10-man", "Settings editor saves custom name and selected profile");
+                Check(edited!.MouseToggleHotkey == "NumPad0" && edited.Current.Slots[0].Hotkey == "F2" && edited.Current.Slots[2].Hotkey == "Ctrl+3" && edited.Current.Slots[3].Hotkey == "Alt+1" && manager.Input.Toggle == KeyBinding.Parse("NumPad0"),
+                    "Recorded keys save and reach the hook snapshot");
             }
             // Install the actual low-level hook too; key routing above is exercised without synthetic input.
             using (var actualHook = new KeyboardHook(manager, _ => { }, () => { }))
@@ -305,7 +397,7 @@ internal static class SelfTest
                 manager.ReadPointer = realPointer;
             }
             var threadedEvents = 0;
-            using (var hookThread = new HookThread(installed => installed.Add(new MouseHook(() => Interlocked.Increment(ref threadedEvents)))))
+            using (var hookThread = new HookThread(installed => installed.Add(new MouseHook(_ => Interlocked.Increment(ref threadedEvents)))))
             {
                 Check(true, "Input hooks install on their own thread");
                 if (!liveApp)
@@ -323,8 +415,44 @@ internal static class SelfTest
                 }
                 else results.Add("SKIP: Synthetic pointer movement for the hook thread while user's app is running.");
             }
+            if (!liveApp && manager.Accounts.TryGetValue(1, out var tracked) && tracked.Valid)
+            {
+                // End to end with the real system setting: Windows, not the app, activates the hovered client.
+                var activateBefore = manager.ActivateWindow; var appActivations = 0;
+                manager.ActivateWindow = _ => { appActivations++; return false; };
+                using var other = new Form { Text = "Foreground placeholder", StartPosition = FormStartPosition.Manual, Bounds = new Rectangle(working.Right - 260, working.Bottom - 200, 200, 150), ShowInTaskbar = false };
+                other.Show(); Native.Activate(other.Handle); Pump();
+                Native.SetWindowPos(tracked.Handle, -1, 0, 0, 0, 0, Native.NoActivate | 0x1 | 0x2);
+                Native.GetWindowRect(tracked.Handle, out var trackedRect);
+                // Start outside the client, as a real sweep from another window does.
+                Native.SetCursorPos(trackedRect.Left - 40, trackedRect.Top + 30); Pump();
+                var marker = Path.Combine(temporary, "live-tracking.restore");
+                using (var system = new WindowTracking(marker))
+                {
+                    var before = system.Original;
+                    manager.SystemTracking = system.Set;
+                    using (new HookThread(installed => installed.Add(new MouseHook(manager.PointerMoved))))
+                    {
+                        for (var attempt = 0; attempt < 40 && Native.GetForegroundWindow() != tracked.Handle; attempt++)
+                        {
+                            Native.GetCursorPos(out var at);
+                            var input = new TestMouseInput { Type = 0, X = at.X < trackedRect.Left + 40 ? 4 : (attempt % 2 == 0 ? 2 : -2), Flags = 1 };
+                            SendInput(1, ref input, Marshal.SizeOf<TestMouseInput>());
+                            Pump(25);
+                        }
+                    }
+                    Native.GetCursorPos(out var cursorNow);
+                    Check(Native.GetForegroundWindow() == tracked.Handle && appActivations == 0, $"Windows' active window tracking focuses the hovered client by itself (tracking={system.Enabled}; input={manager.Input.MouseFocus}/{manager.Input.Paused}/{manager.Input.Editing}; hover={manager.HoverTarget(cursorNow)}; target={tracked.Handle}; managed={manager.IsManaged(tracked.Handle)}; foreground={Native.Title(Native.GetForegroundWindow())}; appActivations={appActivations}; original={system.Original})");
+                    manager.SystemTracking = null;
+                    system.Dispose();
+                    Check(!File.Exists(marker) && new WindowTracking(marker).Original == before, "Live tracking test restores the user's system setting");
+                }
+                manager.ActivateWindow = activateBefore;
+                Native.SetWindowPos(tracked.Handle, -2, 0, 0, 0, 0, Native.NoActivate | 0x1 | 0x2);
+            }
+            else results.Add("SKIP: Live Windows tracking test while user's app is running.");
             var mouseEvents = 0;
-            using (var mouseHook = new MouseHook(() => mouseEvents++))
+            using (var mouseHook = new MouseHook(_ => mouseEvents++))
             {
                 Check(true, "Native mouse hook installs and disposes");
                 if (!liveApp)
