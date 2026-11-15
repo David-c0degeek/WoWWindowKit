@@ -1,5 +1,101 @@
 # Implementation decisions and pre-mortem
 
+## Current architecture
+
+The rest of this file is a decision log, newest first; some entries were later
+reversed. This section is the current state. Update it with each release entry.
+
+Threads:
+
+- **UI thread** (`TrayApp`, forms, `WindowManager` mutation). Owns `Accounts`,
+  settings, the forgotten set, the process cache, drift observation, the swap
+  scheduler (25 ms timer, `ProcessSwaps`) and the 1 s discovery timer. All
+  placement and style writes happen here.
+- **Hook thread** (`HookThread`). Both low-level hooks. Callbacks never do file
+  I/O and never wait for a game. The keyboard callback reads the published
+  `InputState` snapshot and posts swaps and toggles to the UI thread. The mouse
+  callback calls `WindowManager.PointerMoved` (the synchronous Windows tracking
+  gate, which must act before Windows handles the move) and wakes the focus worker.
+- **Focus worker** (`FocusWorker`). Hover decisions (`MouseTick`) and every
+  production window activation. UI-thread activations (keyboard swap, Make main,
+  showing controls or Settings) are queued to it in a single latest-wins slot
+  and revalidated when they run (`ActivateQueued`: not paused, not editing, still
+  managed). A game that blocks activation for seconds delays only later
+  activations and hover decisions, never input delivery or the UI thread.
+
+Locks and what they guard:
+
+| Lock | Holders | Guards | Rule |
+| --- | --- | --- | --- |
+| `WindowManager.trackingLock` | hook thread (`PointerMoved`), UI thread (`HoldTracking`) | `trackingOn`, `trackingHeldAt` | Held only for those fields plus one SystemParametersInfo call. Window and rectangle reads happen before it; inside, a published swap is detected by `settling != null`. |
+| `WindowManager.focusLock` | focus worker (`MouseTick`), UI thread (`StartSwap`) | hover bookkeeping (`mouseAtSwap`, `lastHover`, `hoverSince`, `retryFocusAfter`) | No activation inside it. |
+| `Native.activationGate` | focus worker (and test threads) | the attach / activate / detach sequence | The whole sequence stays serialized; detach is in `finally`. The UI thread never takes it. |
+| `WindowTracking.gate` | hook thread (`Set`), UI / exit paths (`Dispose`) | `on`, `dirty`, `failed` | System calls only; no file I/O on the hook thread. |
+| `Program.logGate` | UI and focus threads | `app.log` writes and rotation | Never taken from a hook callback. |
+
+Publication: the UI thread republishes the immutable `InputState` after every
+change to accounts, settings, pause or editing. Off-UI code reads that snapshot
+and a few volatile fields (`settling`, `swapWaiting`, `trackingOn`,
+`focusRefused`) and never touches UI-owned collections.
+
+Windows tracking recovery: `WindowTracking` reads and records the original
+values in `window-tracking.restore` on the UI thread at startup, before any hook
+can enable tracking. If the read, the marker write, or the repair of a marker
+left by an earlier run fails, tracking stays unavailable for the run and the app
+activates hovered windows itself. Every SystemParametersInfo result is checked.
+A failure on the hook thread rolls back to the originals, stops further changes,
+and is reported to the UI thread for logging. The marker is deleted only once
+the originals are known to be in place; otherwise it stays for the next start.
+
+Single instance: a `Local\` mutex (`Program.InstanceMutexName`) and a hidden
+window (`Program.ControlWindowName`). Later launches send `WM_COPYDATA` with a
+`ControlCommand` and an optional profile name; the running instance switches to
+any existing profile and warns about unknown names.
+
+Shutdown order (`TrayApp.ExitThreadCore`): stop the swap timer, remove the hooks,
+stop the focus worker, restore Windows tracking, close the editor and controls,
+stop discovery, restore every managed window, then dispose the tray, timers and
+the IPC window.
+
+## Audit remediation (v1.0.10)
+
+Source: the defect audit and code-health review of 2026-11-15 (F-1 to F-10,
+M-1 to M-9). Behaviour changes:
+
+- F-1, F-2: the tracking marker is written at startup, outside the hook; tracking
+  is refused when recovery is impossible; SPI results are checked; the marker
+  survives a failed restore. The mouse hook no longer writes files or logs, and
+  its `trackingLock` section no longer reads windows or rectangles.
+- F-3: the UI thread no longer activates windows itself. This reverses the
+  v1.0.4 note that activation is "serialized with UI-thread swaps by a lock":
+  swap activation now runs on the focus worker, concurrently with the
+  asynchronous moves instead of strictly before them. The v1.0.7 holds
+  (settling and the stationary-pointer anchor) are set before the request is
+  queued, so they still cover it.
+- F-5: launchers pass any profile name; `--tray` on a later launch switches
+  without opening controls; `--controls` is parsed explicitly.
+- F-6: Settings passes a copy of its draft to the live settings.
+- F-7: a failed swap rolls geometry back through the asynchronous swap path and
+  writes no style; explicit layouts restore only the styles they changed.
+- F-8: startup errors mention `settings.json` only for settings problems; the
+  tray icon appears only after a successful start.
+- F-4, F-10: README documents the 1 s hover-hold cap and every settings key.
+
+Open question OQ-1 (swap moves skip `WM_WINDOWPOSCHANGING` through
+`SWP_NOSENDCHANGING`) is unchanged; it belongs to the live DX12 acceptance plan.
+
+Queued activations also carry a generation that every swap cancellation bumps, so
+an explicit layout, profile or settings change drops a stale swap activation.
+
+Verification: Release build 0 warnings. Full self-test 213 checks, no groups
+skipped (tray app closed); it now runs in named groups (`--self-test <group,…>`)
+and adds fault injection for the tracking marker and SPI failures, a worker
+blocked in activation, stale and coalesced activation requests, swap rollback,
+launch parsing and shared picker labels. Packaged smoke test: 15 checks, adding a
+hand-edited custom profile, `--tray` and unknown-name launches. The candidate is
+`artifacts/candidate-1.0.10`, staged in `dist`; the previous executable is kept as
+`dist/WoWWindowKit.previous-1.0.9.exe`. Real-client acceptance is still outstanding.
+
 ## Serialize swaps and measure settling (v1.0.9)
 
 Failed future: a delayed client receives another burst of asynchronous resizes,

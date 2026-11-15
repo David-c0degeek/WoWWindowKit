@@ -11,9 +11,9 @@ internal sealed class SettingsForm : Form
     private readonly ComboBox profiles = new() { Name = "profiles", DropDownStyle = ComboBoxStyle.DropDownList, Width = 150 };
     private readonly CheckBox mouseFocus = new() { Text = "Focus follows mouse over WoW", AutoSize = true };
     private readonly CheckBox borderless = new() { Text = "Borderless windows", AutoSize = true };
-    private readonly HotkeyGrid grid = new() { Name = "layout", Dock = DockStyle.Fill, AutoGenerateColumns = false, AllowUserToAddRows = false, AllowUserToDeleteRows = false, RowHeadersVisible = false, AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill, BackgroundColor = SystemColors.Window, BorderStyle = BorderStyle.FixedSingle };
+    private readonly HotkeyGrid grid = new() { Name = "layout", Dock = DockStyle.Fill, AutoGenerateColumns = false, AllowUserToAddRows = false, AllowUserToDeleteRows = false, RowHeadersVisible = false, AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill, BorderStyle = BorderStyle.FixedSingle };
     private readonly HotkeyBox toggleKey = new() { Name = "toggleKey", Width = 150, ReadOnly = true };
-    private readonly Label hint = new() { Name = "hint", Dock = DockStyle.Fill, ForeColor = SystemColors.GrayText, TextAlign = ContentAlignment.MiddleLeft };
+    private readonly Label hint = new() { Name = "hint", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft };
     private const string DefaultHint = "To change a key, select it and press the new combination. Mouse focus and hotkeys pause while this window is open.";
     private readonly FlowLayoutPanel assignments = new() { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = false, AutoScroll = true };
     private readonly LayoutPreview preview;
@@ -21,7 +21,7 @@ internal sealed class SettingsForm : Form
     internal SettingsForm(WindowManager manager, Action<AppSettings> save)
     {
         this.manager = manager; this.save = save; draft = manager.Settings.Copy();
-        Text = draft.DisplayName; Font = new Font("Segoe UI", 10); StartPosition = FormStartPosition.CenterScreen;
+        Text = draft.DisplayName; Font = DarkTheme.CreateFont(); StartPosition = FormStartPosition.CenterScreen;
         MinimumSize = new Size(850, 740); Size = new Size(940, 820); AutoScaleMode = AutoScaleMode.Dpi;
         Icon = Program.AppIcon;
         var root = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(18), ColumnCount = 1, RowCount = 8 };
@@ -58,7 +58,7 @@ internal sealed class SettingsForm : Form
         root.Controls.Add(grid, 0, 3);
         root.Controls.Add(new Label { Text = "Account assignment — numbers stay with accounts when swapping", AutoSize = true, Padding = new Padding(0, 8, 0, 0) }, 0, 4);
         root.Controls.Add(assignments, 0, 5);
-        ShowHint(DefaultHint, false); root.Controls.Add(hint, 0, 6);
+        root.Controls.Add(hint, 0, 6);
         var buttons = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.RightToLeft };
         var apply = new Button { Name = "save", Text = "Save && apply", AutoSize = true };
         var cancel = new Button { Text = "Cancel", AutoSize = true, DialogResult = DialogResult.Cancel };
@@ -70,12 +70,15 @@ internal sealed class SettingsForm : Form
             if (!grid.EndEdit()) { loading = true; profiles.SelectedItem = draft.ActiveProfile; loading = false; return; }
             draft.ActiveProfile = (string)profiles.SelectedItem!; BindLayout();
         };
-        BindLayout(); DarkTheme.Apply(this);
+        BindLayout();
+        DarkTheme.Apply(this);
+        // After Apply, which gives every control the plain text colour.
+        ShowHint(DefaultHint, false);
     }
     private void ShowHint(string text, bool warning)
     {
         hint.Text = text;
-        hint.ForeColor = warning ? Color.FromArgb(240, 180, 90) : SystemColors.GrayText;
+        hint.ForeColor = warning ? DarkTheme.Warning : DarkTheme.Muted;
     }
     // Plain navigation keys keep their normal meaning in the grid and dialog.
     private static bool IsNavigation(KeyBinding binding) =>
@@ -149,9 +152,15 @@ internal sealed class SettingsForm : Form
             if (selections.Select(s => s.Handle).Distinct().Count() != selections.Count)
                 throw new InvalidDataException("Choose a different WoW window for each account.");
             if (selections.Any(s => !Native.IsWindow(s.Handle))) throw new InvalidOperationException("A selected WoW window closed. Cancel and reopen settings to refresh the list.");
-            save(draft);
-            foreach (var (number, handle) in selections)
-                if (!manager.Accounts.TryGetValue(number, out var current) || current.Handle != handle) manager.Assign(number, handle);
+            // The live settings get their own copy: this form's draft never becomes the live object,
+            // so later edits and Cancel cannot change what was saved.
+            save(draft.Copy());
+            try
+            {
+                foreach (var (number, handle) in selections)
+                    if (!manager.Accounts.TryGetValue(number, out var current) || current.Handle != handle) manager.Assign(number, handle);
+            }
+            catch (Exception ex) { throw new InvalidOperationException($"Settings were saved, but an account assignment failed: {ex.Message}", ex); }
             DialogResult = DialogResult.OK; Close();
         }
         catch (Exception ex) { DarkTheme.Message(this, ex.Message, Text); }
@@ -179,10 +188,9 @@ internal sealed class HotkeyBox : TextBox
 
 internal sealed class LayoutPreview(Func<LayoutProfile> profile) : Control
 {
-    internal LayoutPreview() : this(() => new LayoutProfile()) { }
     protected override void OnPaint(PaintEventArgs e)
     {
-        base.OnPaint(e); e.Graphics.Clear(Color.FromArgb(27, 32, 42));
+        base.OnPaint(e); e.Graphics.Clear(DarkTheme.PreviewBackground);
         var slots = profile().Slots;
         if (slots.Count == 0) return;
         var minX = slots.Min(s => s.X); var minY = slots.Min(s => s.Y);
@@ -194,9 +202,9 @@ internal sealed class LayoutPreview(Func<LayoutProfile> profile) : Control
         {
             var slot = slots[i];
             var rect = new Rectangle((int)((slot.X - (long)minX) * scale) + 10, (int)((slot.Y - (long)minY) * scale) + 10, Math.Max(1, (int)(slot.Width * scale) - 1), Math.Max(1, (int)(slot.Height * scale) - 1));
-            using var brush = new SolidBrush(i == 0 ? Color.FromArgb(54, 116, 191) : Color.FromArgb(58, 72, 94));
+            using var brush = new SolidBrush(i == 0 ? DarkTheme.PreviewMain : DarkTheme.PreviewSlot);
             e.Graphics.FillRectangle(brush, rect);
-            TextRenderer.DrawText(e.Graphics, i == 0 ? "1 · Main" : (i + 1).ToString(), Font, rect, Color.White, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+            TextRenderer.DrawText(e.Graphics, i == 0 ? "1 · Main" : (i + 1).ToString(System.Globalization.CultureInfo.CurrentCulture), Font, rect, Color.White, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
         }
     }
 }

@@ -20,7 +20,8 @@ public sealed class LayoutProfile
 
 public sealed class AppSettings
 {
-    public string DisplayName { get; set; } = "Notepad++";
+    internal const string DefaultDisplayName = "Notepad++";
+    public string DisplayName { get; set; } = DefaultDisplayName;
     public string ActiveProfile { get; set; } = "5-man";
     public bool MouseFocus { get; set; } = true;
     public bool Borderless { get; set; } = true;
@@ -29,6 +30,8 @@ public sealed class AppSettings
     public List<string> ProcessNames { get; set; } = ["Wow", "WowClassic", "WowClassicT"];
     public List<LayoutProfile> Profiles { get; set; } = [];
     [System.Text.Json.Serialization.JsonIgnore] public LayoutProfile Current => Profiles.Single(p => p.Name == ActiveProfile);
+    /// <summary>The profile's exact name, matched case-insensitively (profile names are unique that way); null if none.</summary>
+    internal string? FindProfile(string name) => Profiles.FirstOrDefault(p => string.Equals(p.Name, name, StringComparison.OrdinalIgnoreCase))?.Name;
     internal static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true, PropertyNameCaseInsensitive = true };
     internal static string FilePath => Path.Combine(AppContext.BaseDirectory, "settings.json");
     internal static AppSettings Load(string path)

@@ -13,10 +13,10 @@ internal sealed class MouseHook : IDisposable
     {
         callback = (code, message, data) =>
         {
-            if (code >= 0 && (int)message is 0x200 or 0x202 or 0x205 or 0x208 or 0x20C) changed(Marshal.PtrToStructure<Native.MouseData>(data).Point);
+            if (code >= 0 && (int)message is Native.WmMouseMove or Native.WmLButtonUp or Native.WmRButtonUp or Native.WmMButtonUp or Native.WmXButtonUp) changed(Marshal.PtrToStructure<Native.MouseData>(data).Point);
             return Native.CallNextHookEx(hook, code, message, data);
         };
-        hook = Native.SetWindowsHookEx(14, callback, Native.GetModuleHandle(null), 0);
+        hook = Native.SetWindowsHookEx(Native.WhMouseLl, callback, Native.GetModuleHandle(null), 0);
         if (hook == 0) throw new Win32Exception(Marshal.GetLastWin32Error(), "Could not enable mouse focus tracking.");
     }
     public void Dispose() { if (hook != 0) Native.UnhookWindowsHookEx(hook); hook = 0; }

@@ -137,14 +137,19 @@ sweeping across clients reaches each client as soon as the pointer enters it.
 The app turns tracking on only while the pointer is over an exposed managed WoW
 window (no delay, windows are not raised) and restores your own setting
 elsewhere. The change is memory-only: exiting, logging off or rebooting restores
-it, and if the app is killed while tracking is on, the next start repairs it. If
-Windows has not switched to the hovered client within 150 ms, the app switches
-focus itself.
+it. At startup the app records your original values in `window-tracking.restore`
+beside the executable, so if it is killed while tracking is on, the next start
+repairs it. If that file cannot be written, or Windows refuses a tracking change,
+the app leaves tracking off for the rest of the run, shows a tray warning, and
+switches focus itself instead. If Windows has not switched to the hovered client
+within 150 ms, the app switches focus itself.
 
 Focus pauses while a mouse button is held or Settings is open. After a hotkey
 swap, hover focus waits until the clients have finished moving to their new slots,
 so a small mouse movement during the swap cannot hand focus back to the previous
-main. A stationary pointer then leaves the chosen account active; the first mouse
+main. That wait is capped at 1 second, so a client that never applies its resize
+cannot block hover focus; a client still moving after 1 second can receive hover
+focus again. A stationary pointer then leaves the chosen account active; the first mouse
 movement resumes hover focus. Mouse transitions are event-driven, with a periodic
 fallback for windows appearing beneath a stationary pointer.
 
@@ -177,8 +182,19 @@ same core actions.
 
 Closing the control window or choosing **Hide to tray** keeps the app running.
 Use `WoWWindowKit.exe --tray` on first launch to start hidden. Only one instance
-runs per Windows session: another profile launcher switches the existing instance,
-and another Settings launch opens its editor.
+runs per Windows session, and later launches are handed to it:
+
+| Command line | First launch | App already running |
+| --- | --- | --- |
+| *(none)* or `--controls` | Start and open controls | Open controls |
+| `--tray` | Start hidden in the tray | Nothing else to do |
+| `--settings` | Start and open Settings | Open Settings |
+| `--exit` | Do nothing | Restore windows and quit |
+| `--profile <name>` | Start with that profile | Switch to that profile, then do the above |
+
+`--profile` accepts any profile name in `settings.json`, ignoring case, so a
+launcher for a custom profile works too. An unknown name stops a first launch with
+an error; a running instance keeps its profile and shows a tray warning.
 
 ### Changing hotkeys
 
@@ -222,12 +238,17 @@ They are not saved as persistent account identities.
 writable. Saves are validated and atomic, and the previous version is kept as
 `settings.json.bak`. Restart the app after editing the JSON manually.
 
-| Setting | Behavior |
-| --- | --- |
-| **App name** | Changes control / Settings titles, tray label, and application dialogs on save; game titles are unaffected. |
-| **Profiles** | Each profile stores window coordinates and account swap keys. |
-| **ProcessNames** | Exact allowed executable names, without `.exe`: `Wow`, `WowClassic`, and `WowClassicT` by default. |
-| **MousePollMs** | Fallback mouse-focus polling interval; defaults to 50 ms. |
+| JSON key (Settings label) | Type, default | Behavior and validation |
+| --- | --- | --- |
+| `DisplayName` (**App name**) | text, `Notepad++` | Control / Settings titles, tray label and application dialogs; game titles are unaffected. 1–80 characters. |
+| `ActiveProfile` (**Layout**) | text, `5-man` | The profile in use; must name one of `Profiles`. |
+| `MouseFocus` (**Focus follows mouse over WoW**) | true/false, `true` | Hover focus on or off; also the toggle key and the controls / tray toggle. |
+| `Borderless` (**Borderless windows**) | true/false, `true` | Removes caption and frame from managed clients while they are in a slot. |
+| `MousePollMs` | number, `50` | Fallback mouse-focus polling interval in milliseconds; 20–1000. |
+| `MouseToggleHotkey` (**Mouse focus toggle key**) | text, `Ctrl+Shift+F` | Same rules as swap keys (see *Changing hotkeys*); must differ from every swap key. |
+| `ProcessNames` | list of text, `Wow`, `WowClassic`, `WowClassicT` | Exact allowed executable names, without `.exe`; at least one. |
+| `Profiles` | list | Each has a `Name` (unique, ignoring case) and 1–10 `Slots`. |
+| `Profiles[].Slots[]` | `X`, `Y`, `Width`, `Height`, `Hotkey` | Slot 1 is the main window. Width and height 100–32768 pixels, X and Y within ±100000; each slot's `Hotkey` is unique in its profile. |
 
 You can rename `WoWWindowKit.exe` while it is closed; update the four generated
 `.cmd` launchers to use the new filename. Settings are located relative to the
@@ -242,11 +263,15 @@ name or embedded product metadata separately from the configured app name.
 | **A client has the wrong number** | Use **Catch / assign** to select the intended account slot. |
 | **A client is not discovered** | Check `ProcessNames` and whether the client was forgotten during this session. |
 | **The app seems to have disappeared** | Check Windows' hidden tray icons, or run `Controls.cmd`. Closing controls hides the panel. |
-| **Settings fail to load** | Inspect `settings.json` and the previous save in `settings.json.bak`; check `app.log` beside the executable. |
+| **Settings fail to load** | The startup error says so and names `settings.json`. Inspect it and the previous save in `settings.json.bak`; check `app.log` beside the executable. |
+| **Another startup error** (for example, hotkeys could not be enabled) | Not a settings problem; details are in `app.log`. Check that no other tool blocks low-level keyboard hooks, and restart the app. |
+| **Tray warning: active window tracking is off** | The app could not write `window-tracking.restore` or change the Windows setting. Hover focus still works through the app's own activation; keep the application folder writable and restart to restore the faster path. |
 | **Windows remain borderless after a crash** | Relaunch the app and exit normally, or restart the game clients. |
 
 Mouse focus uses Windows' active window tracking. Keyboard swaps and the hover
-fallback use foreground activation with a temporary input-thread attachment. Threads are detached immediately afterward, and hung windows are skipped.
+fallback use foreground activation with a temporary input-thread attachment, run on
+a background worker so a busy game cannot freeze the controls or tray. Threads are
+detached immediately afterward, and hung windows are skipped.
 Actual focus behavior and rendering after a resize depend on the game and the
 Windows session.
 
@@ -256,6 +281,7 @@ Requires **Windows x64** and the **.NET 10 SDK**. There are no third-party packa
 
 ```powershell
 .\test.ps1                 # Integration checks using ten separate mock clients
+.\test.ps1 -Groups settings,tracking-marker   # A subset; no windows, cursor or focus changes
 .\build.ps1                # Smaller build; requires .NET 10 Windows Desktop runtime
 .\build.ps1 -Portable      # Self-contained build; no installed runtime needed
 .\smoke-test.ps1           # Packaged app, launchers, renaming, and clean shutdown
@@ -265,6 +291,12 @@ Build output goes to `dist`. Tests cover native window movement, repeated swaps,
 account identity, client restarts, overlapping non-game windows, contextual hotkeys,
 profile changes, settings validation, and restoration of styles and positions.
 They do not attach to real WoW clients.
+
+Self-test groups, in run order: `settings`, `tracking-marker`, `swaps`, `hotkeys`,
+`hover`, `activation`, `assignment`, `controls-ui`, `hooks` and `live-tracking`.
+The first two need no windows. Each other group starts the same three mock clients
+first, so it can also run alone; in a full run, later groups reuse what earlier
+ones left behind (more clients, the 10-man profile, edited settings).
 
 Exit the tray app before testing to exercise the foreground and synthetic pointer
 groups. When it is already running, tests skip those groups and use simulated

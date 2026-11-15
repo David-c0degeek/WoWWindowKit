@@ -131,6 +131,22 @@ internal static class SwapTests
             check(failed && manager.MainAccount == 1 && !manager.LayoutSettling() && manager.Swap(3),
                 "Placement failure preserves the logical main and clears scheduler state for the next request");
             Complete();
+
+            // Rollback after a partial swap: geometry goes back through the same asynchronous,
+            // frame-preserving path, and no window style is written.
+            Fresh();
+            foreach (var client in manager.Accounts.Values) Native.SendMessage(client.Handle, TestClientForm.CounterMessage, 2, 0);
+            var placements = 0;
+            manager.PositionSwapWindow = (h, b) => { if (++placements == 2) throw new InvalidOperationException("simulated second placement failure"); moves.Add((h, b)); };
+            failed = false;
+            try { manager.Swap(2); } catch (InvalidOperationException e) when (e.Message == "simulated second placement failure") { failed = true; }
+            manager.PositionSwapWindow = (h, b) => moves.Add((h, b));
+            static Rectangle? Real(nint h) => Native.GetWindowRect(h, out var r) ? r.Rectangle : null;
+            check(failed && moves.Count == 3 && moves[1].Handle == moves[0].Handle && moves[1].Bounds == Real(moves[0].Handle) && moves[2].Bounds == Real(moves[2].Handle) && moves[2].Handle != moves[0].Handle,
+                "Swap rollback returns every touched window through the asynchronous swap path");
+            check(manager.Accounts.Values.All(w => Native.SendMessage(w.Handle, TestClientForm.CounterMessage, 1, 0) == 0 && Native.SendMessage(w.Handle, TestClientForm.CounterMessage, 0, 0) == 0),
+                "Swap rollback writes no window style and no synchronous frame change");
+            check(manager.MainAccount == 1 && !manager.LayoutSettling(), "Swap rollback keeps the logical main");
         }
         finally
         {

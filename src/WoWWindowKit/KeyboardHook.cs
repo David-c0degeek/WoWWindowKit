@@ -16,17 +16,17 @@ internal sealed class KeyboardHook : IDisposable
         this.manager = manager; this.swap = swap; this.toggleMouse = toggleMouse;
         callback = Callback;
         if (!install) return;
-        hook = Native.SetWindowsHookEx(13, callback, Native.GetModuleHandle(null), 0);
+        hook = Native.SetWindowsHookEx(Native.WhKeyboardLl, callback, Native.GetModuleHandle(null), 0);
         if (hook == 0) throw new Win32Exception(Marshal.GetLastWin32Error(), "Could not enable swap hotkeys.");
     }
     private nint Callback(int code, nint message, nint data)
     {
-        if (code >= 0 && ((int)message is 0x100 or 0x101 or 0x104 or 0x105))
+        if (code >= 0 && ((int)message is Native.WmKeyDown or Native.WmKeyUp or Native.WmSysKeyDown or Native.WmSysKeyUp))
         {
             var key = (int)Marshal.PtrToStructure<Native.KeyData>(data).Key;
-            var down = (int)message is 0x100 or 0x104;
-            var binding = new KeyBinding(key, Native.Down(17), Native.Down(16), Native.Down(18));
-            if (HandleKey(binding, down, Native.GetForegroundWindow(), Native.Down(91) || Native.Down(92))) return 1;
+            var down = (int)message is Native.WmKeyDown or Native.WmSysKeyDown;
+            var binding = new KeyBinding(key, Native.Down(Keys.ControlKey), Native.Down(Keys.ShiftKey), Native.Down(Keys.Menu));
+            if (HandleKey(binding, down, Native.GetForegroundWindow(), Native.Down(Keys.LWin) || Native.Down(Keys.RWin))) return 1;
         }
         return Native.CallNextHookEx(hook, code, message, data);
     }

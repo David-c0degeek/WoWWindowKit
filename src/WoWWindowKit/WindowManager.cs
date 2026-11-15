@@ -17,44 +17,34 @@ internal sealed class ManagedWindow
 /// <summary>Immutable state read by the input-hook and focus threads without touching UI-owned collections.</summary>
 internal sealed record InputState(IReadOnlyDictionary<nint, int> Managed, IReadOnlyDictionary<nint, int> Numbers, IReadOnlyDictionary<KeyBinding, (int Number, nint Handle)> SwapKeys, KeyBinding Toggle, bool Editing, bool Paused, bool MouseFocus);
 
+/// <summary>
+/// Owns client discovery, layout, swaps and hover focus. Threads (see docs/implementation.md,
+/// "Current architecture"): the UI thread owns every mutable collection and the swap scheduler;
+/// the hook thread calls <see cref="PointerMoved"/>; the focus worker calls <see cref="MouseTick"/>
+/// and <see cref="ActivateQueued"/>. Off-UI code reads only the published <see cref="InputState"/>
+/// snapshot, volatile fields, and state guarded by <c>trackingLock</c> or <c>focusLock</c>.
+/// </summary>
 internal sealed class WindowManager : IDisposable
 {
+    // ---- UI thread only ----
     private AppSettings settings;
     private bool paused, editing;
-    private volatile InputState input = new(new Dictionary<nint, int>(), new Dictionary<nint, int>(), new Dictionary<KeyBinding, (int, nint)>(), default, false, false, false);
-    private volatile bool focusRefused;
     private string status = "Waiting for WoW windows";
-    private readonly object focusLock = new();
     private readonly Dictionary<int, (long Created, bool Eligible)> processCache = [];
+    private readonly HashSet<(nint Handle, int Pid, long Start)> forgotten = [];
+    private readonly Func<int, bool>? testProcess;
+    /// <summary>Moves issued by the swap currently being started (null outside StartSwap).</summary>
+    private List<(nint Handle, Rectangle Bounds)>? recordedMoves;
+    private readonly Dictionary<nint, (Rectangle Bounds, long Frame, bool Zoomed, int Slot)> observedDrift = [];
     internal AppSettings Settings { get => settings; set { CancelSwaps("settings changed"); settings = value; processCache.Clear(); Publish(); } }
     internal Dictionary<int, ManagedWindow> Accounts { get; } = [];
     internal int MainAccount { get; private set; } = 1;
     internal bool Paused { get => paused; set { if (value) CancelQueuedSwap("paused"); paused = value; Publish(); } }
     internal bool Editing { get => editing; set { if (value) CancelQueuedSwap("editing"); editing = value; Publish(); } }
     internal string Status => focusRefused ? "Windows refused focus — click a WoW window once, then retry" : status;
-    internal string MouseDecision { get; private set; } = "Idle";
-    internal InputState Input => input;
     internal Action? Changed;
-    /// <summary>Raised on the thread that activated a window; owners must marshal UI work.</summary>
-    internal Action? FocusWarningChanged;
-    internal Func<Native.Point?> ReadPointer = static () => Native.GetCursorPos(out var point) ? point : null;
-    internal Func<bool> MouseInputHeld = static () => Native.Down(1) || Native.Down(2) || Native.Down(4) || Native.Down(5) || Native.Down(6);
-    internal Func<nint, bool> ActivateWindow = Native.Activate;
-    /// <summary>Turns Windows' active window tracking on or off; null leaves the system untouched (tests).</summary>
-    internal Action<bool>? SystemTracking;
-    /// <summary>How long Windows gets to activate a hovered window before the app does it itself.</summary>
-    internal int TrackingGraceMs = 150;
-    private volatile bool trackingOn;
-    private readonly object trackingLock = new();
-    private Native.Point? trackingHeldAt;
-    /// <summary>After a swap, windows still on their way to new slots; null targets = not yet issued.</summary>
-    private sealed record Settling(long Deadline, (nint Handle, Rectangle Bounds)[]? Targets);
-    private volatile Settling? settling;
-    private List<(nint Handle, Rectangle Bounds)>? recordedMoves;
-    /// <summary>Upper bound for suppressing hover focus; the swap scheduler has a separate timeout.</summary>
-    internal int SettleTimeoutMs = 1000;
-    internal Func<nint, Rectangle?> ReadBounds = static handle => Native.GetWindowRect(handle, out var rect) ? rect.Rectangle : null;
-    // Scheduler state belongs to the UI thread. Hover threads read only swapWaiting/settling.
+
+    // ---- Swap scheduler: UI thread only (25 ms timer). Hover threads read only swapWaiting/settling. ----
     private sealed record SwapRequest(long Id, int Account, ManagedWindow Window, long RequestedAt, bool RequireGameForeground);
     private sealed class SwapTransition(SwapRequest request, long startedAt, (nint Handle, Rectangle Bounds)[] targets)
     {
@@ -69,19 +59,63 @@ internal sealed class WindowManager : IDisposable
     private SwapRequest? queuedSwap;
     private long swapSequence;
     private long issuingSwapId;
-    private volatile bool swapWaiting;
     internal int SwapQuietMs = 50;
     internal int SwapTimeoutMs = 2000;
-    internal Func<long> SwapClock = static () => Environment.TickCount64;
-    internal Func<nint> ReadForeground = Native.GetForegroundWindow;
-    internal Action<nint, Rectangle> PositionSwapWindow = static (h, b) => Native.Position(h, b, frameChanged: false, asynchronous: true);
-    internal Action<string> TraceSwap = Program.LogLine;
+
+    // ---- Published for the hook and focus threads (written on the UI thread) ----
+    private volatile InputState input = new(new Dictionary<nint, int>(), new Dictionary<nint, int>(), new Dictionary<KeyBinding, (int, nint)>(), default, false, false, false);
+    internal InputState Input => input;
+    /// <summary>After a swap, windows still on their way to new slots; null targets = not yet issued.</summary>
+    private sealed record Settling(long Deadline, (nint Handle, Rectangle Bounds)[]? Targets);
+    /// <summary>Written by the UI thread; cleared by any thread with a compare-exchange once settled.</summary>
+    private volatile Settling? settling;
+    private volatile bool swapWaiting;
+    /// <summary>Upper bound for suppressing hover focus; the swap scheduler has a separate, longer timeout.</summary>
+    internal int SettleTimeoutMs = 1000;
+
+    // ---- Windows tracking gate: guarded by trackingLock (hook thread; UI thread in HoldTracking) ----
+    // Holders keep the lock only for these fields plus one SystemParametersInfo call: no window
+    // reads, rectangle reads or I/O, so the hook never waits behind slow work.
+    private readonly object trackingLock = new();
+    private Native.Point? trackingHeldAt;
+    /// <summary>Written under trackingLock; read without it by the focus worker (grace period).</summary>
+    private volatile bool trackingOn;
+
+    // ---- Hover decisions: guarded by focusLock (focus worker; UI thread in StartSwap) ----
+    private readonly object focusLock = new();
     private long hoverSince;
     private Native.Point? mouseAtSwap;
     private nint lastHover;
     private long retryFocusAfter;
-    private readonly Func<int, bool>? testProcess;
-    private readonly HashSet<(nint Handle, int Pid, long Start)> forgotten = [];
+    private volatile bool focusRefused;
+    /// <summary>Last hover decision, for tests and diagnostics (focus worker).</summary>
+    internal string MouseDecision { get; private set; } = "Idle";
+    /// <summary>Raised on the thread that activated a window; owners must marshal UI work.</summary>
+    internal Action? FocusWarningChanged;
+
+    // ---- Seams: set once by the owner or by tests ----
+    internal Func<Native.Point?> ReadPointer = static () => Native.GetCursorPos(out var point) ? point : null;
+    internal Func<bool> MouseInputHeld = static () => Native.Down(Keys.LButton) || Native.Down(Keys.RButton) || Native.Down(Keys.MButton) || Native.Down(Keys.XButton1) || Native.Down(Keys.XButton2);
+    /// <summary>Performs one activation; production calls it only on the focus worker.</summary>
+    internal Func<nint, bool> ActivateWindow = Native.Activate;
+    /// <summary>
+    /// Queues a UI-thread activation job (keyboard swap, Make main) on the focus worker so a busy
+    /// game cannot stall the UI thread. Null activates synchronously (tests without a worker).
+    /// </summary>
+    internal Action<Action>? RequestActivation;
+    /// <summary>Bumped whenever swaps are cancelled (explicit layout, settings, profile, failure, exit); stale queued activations are dropped.</summary>
+    private long activationGeneration;
+    internal long ActivationGeneration => Interlocked.Read(ref activationGeneration);
+    /// <summary>Turns Windows' active window tracking on or off and reports success; null leaves the system untouched.</summary>
+    internal Func<bool, bool>? SystemTracking;
+    /// <summary>How long Windows gets to activate a hovered window before the app does it itself.</summary>
+    internal int TrackingGraceMs = 150;
+    internal Func<nint, Rectangle?> ReadBounds = static handle => Native.GetWindowRect(handle, out var rect) ? rect.Rectangle : null;
+    internal Func<long> SwapClock = static () => Environment.TickCount64;
+    internal Func<nint> ReadForeground = Native.GetForegroundWindow;
+    internal Action<nint, Rectangle> PositionSwapWindow = static (h, b) => Native.Position(h, b, frameChanged: false, asynchronous: true);
+    internal Action<string> TraceSwap = Program.LogLine;
+
     private static (nint Handle, int Pid, long Start) Identity(ManagedWindow window) => (window.Handle, window.Pid, window.StartTicks);
     internal bool IsForgotten(ManagedWindow window) => forgotten.Contains(Identity(window));
     internal WindowManager(AppSettings settings, Func<int, bool>? testProcess = null) { this.settings = settings; this.testProcess = testProcess; Publish(); }
@@ -102,13 +136,27 @@ internal sealed class WindowManager : IDisposable
         input = new InputState(managed, numbers, keys, KeyBinding.Parse(Settings.MouseToggleHotkey), editing, paused, Settings.MouseFocus);
     }
 
+    /// <summary>Status line shown in the controls and tray menu after a layout or swap.</summary>
+    private string LayoutStatus() => $"{Accounts.Count(p => p.Key <= Settings.Current.Slots.Count)} / {Settings.Current.Slots.Count} accounts · {Settings.ActiveProfile}";
+
+    /// <summary>
+    /// One line for a running client in the assignment pickers: Newest, then Slot N / Forgotten /
+    /// Unassigned, PID and title. Menu callers escape '&amp;' themselves.
+    /// </summary>
+    internal string Describe(ManagedWindow window, bool newest)
+    {
+        var assignment = Accounts.FirstOrDefault(p => p.Value.Handle == window.Handle && p.Value.Valid);
+        var state = assignment.Value != null ? $"Slot {assignment.Key}" : IsForgotten(window) ? "Forgotten" : "Unassigned";
+        return $"{(newest ? "Newest · " : "")}{state} · PID {window.Pid} · {window.Title}";
+    }
+
     internal IReadOnlyList<ManagedWindow> Discover()
     {
         var found = new List<ManagedWindow>();
         var processes = new Dictionary<int, (bool Eligible, long Start)>();
         Native.EnumWindows((window, _) =>
         {
-            if (!Native.IsWindowVisible(window) || Native.GetWindow(window, 4) != 0) return true; // owned dialogs are not clients
+            if (!Native.IsWindowVisible(window) || Native.GetWindow(window, Native.GwOwner) != 0) return true; // owned dialogs are not clients
             Native.GetWindowThreadProcessId(window, out var rawPid);
             var pid = (int)rawPid;
             if (!processes.TryGetValue(pid, out var info)) processes[pid] = info = ProcessInfo(pid);
@@ -117,7 +165,7 @@ internal sealed class WindowManager : IDisposable
             if (!Native.GetWindowPlacement(window, ref placement)) return true;
             // A just-created visible window can briefly report SW_HIDE during startup.
             // Restoring that transitional state would hide the window when forgotten.
-            if (placement.ShowCmd == 0) placement.ShowCmd = 1;
+            if (placement.ShowCmd == 0) placement.ShowCmd = Native.SwShowNormal;
             found.Add(new ManagedWindow { Handle = window, Pid = pid, StartTicks = info.Start,
                 Title = Native.Title(window), OriginalStyle = Native.GetWindowLongPtr(window, Native.GwlStyle), OriginalPlacement = placement });
             return true;
@@ -131,7 +179,7 @@ internal sealed class WindowManager : IDisposable
     // creation time (which also guards against PID reuse) is unchanged.
     private (bool Eligible, long Start) ProcessInfo(int pid)
     {
-        var handle = Native.OpenProcess(0x1000, false, pid); // PROCESS_QUERY_LIMITED_INFORMATION
+        var handle = Native.OpenProcess(Native.ProcessQueryLimitedInformation, false, pid);
         if (handle == 0) return (false, 0);
         try
         {
@@ -205,7 +253,8 @@ internal sealed class WindowManager : IDisposable
     {
         if (!swapOnly) CancelSwaps("explicit layout");
         var targetMain = main ?? MainAccount;
-        var rollback = new List<(ManagedWindow Window, nint Style, Rectangle Bounds)>();
+        // Style is recorded only where this call changed it; bounds are null when unreadable.
+        var rollback = new List<(ManagedWindow Window, nint? Style, Rectangle? Bounds)>();
         try
         {
             foreach (var pair in Accounts)
@@ -216,19 +265,19 @@ internal sealed class WindowManager : IDisposable
                 if (pair.Key > Settings.Current.Slots.Count) { Restore(window); continue; }
                 var slot = SlotFor(pair.Key, targetMain);
                 if (slot < 1 || slot > Settings.Current.Slots.Count) continue;
-                Native.GetWindowRect(window.Handle, out var before);
-                rollback.Add((window, Native.GetWindowLongPtr(window.Handle, Native.GwlStyle), before.Rectangle));
+                Rectangle? before = Native.GetWindowRect(window.Handle, out var rect) ? rect.Rectangle : null;
                 var style = Native.GetWindowLongPtr(window.Handle, Native.GwlStyle);
                 var desiredStyle = Settings.Borderless ? (nint)((long)window.OriginalStyle & ~Native.BorderMask) : window.OriginalStyle;
                 var styleChanged = !swapOnly && style != desiredStyle;
+                rollback.Add((window, styleChanged ? style : null, before));
                 if (styleChanged) Native.SetWindowLongPtr(window.Handle, Native.GwlStyle, desiredStyle);
-                if (Native.IsIconic(window.Handle)) Native.ShowWindow(window.Handle, 4); // show without activation
+                if (Native.IsIconic(window.Handle)) Native.ShowWindow(window.Handle, Native.SwShowNoActivate);
                 var bounds = Settings.Current.Slots[slot - 1].Bounds;
-                if (swapOnly || styleChanged || before.Rectangle != bounds)
+                if (swapOnly || styleChanged || before != bounds)
                 {
                     if (swapOnly)
                     {
-                        TraceSwap($"Swap #{issuingSwapId} move: account {pair.Key}, PID {window.Pid}, {before.Rectangle} -> {bounds}, style 0x{(long)style:X8}.");
+                        TraceSwap($"Swap #{issuingSwapId} move: account {pair.Key}, PID {window.Pid}, {before?.ToString() ?? "unreadable"} -> {bounds}, style 0x{(long)style:X8}.");
                         PositionSwapWindow(window.Handle, bounds);
                     }
                     else Native.Position(window.Handle, bounds, styleChanged);
@@ -237,14 +286,22 @@ internal sealed class WindowManager : IDisposable
             }
             MainAccount = targetMain;
             if (!swapOnly) observedDrift.Clear();
-            status = $"{Accounts.Count(p => p.Key <= Settings.Current.Slots.Count)} / {Settings.Current.Slots.Count} accounts · {Settings.ActiveProfile}";
+            status = LayoutStatus();
         }
         catch
         {
+            // A swap never writes styles, so its rollback moves geometry back through the same
+            // asynchronous, frame-preserving path. Explicit layouts restore what they changed.
             foreach (var item in rollback.Where(r => r.Window.Valid))
             {
-                Native.SetWindowLongPtr(item.Window.Handle, Native.GwlStyle, item.Style);
-                try { Native.Position(item.Window.Handle, item.Bounds); } catch { /* keep the original failure */ }
+                try
+                {
+                    if (item.Style is { } style) Native.SetWindowLongPtr(item.Window.Handle, Native.GwlStyle, style);
+                    if (item.Bounds is not { } bounds) continue;
+                    if (swapOnly) PositionSwapWindow(item.Window.Handle, bounds);
+                    else Native.Position(item.Window.Handle, bounds, frameChanged: item.Style != null);
+                }
+                catch { /* keep the original failure */ }
             }
             throw;
         }
@@ -288,12 +345,15 @@ internal sealed class WindowManager : IDisposable
         // and keep it as it shrinks into the new main's old slot. Hold tracking off until the mouse moves.
         // Games apply the asynchronous resize a frame or more later; until then the old main is
         // still the big window under the pointer, and any hover focus would hand it focus again.
+        // Both holds are in place before the activation request reaches the focus worker.
         settling = new Settling(Environment.TickCount64 + SettleTimeoutMs, null);
         recordedMoves = [];
         try
         {
             HoldTracking(anchor);
-            Activate(request.Window.Handle);
+            var handle = request.Window.Handle;
+            if (RequestActivation is { } queue) { var generation = ActivationGeneration; queue(() => ActivateQueued(handle, generation)); }
+            else Activate(handle);
             ApplyLayout(request.Account, swapOnly: true);
             var targets = recordedMoves.ToArray();
             activeSwap = targets.Length == 0 ? null : new SwapTransition(request, startedAt, targets);
@@ -341,7 +401,7 @@ internal sealed class WindowManager : IDisposable
             swapWaiting = false;
             if (active.TimedOut)
             {
-                status = $"{Accounts.Count(p => p.Key <= Settings.Current.Slots.Count)} / {Settings.Current.Slots.Count} accounts · {Settings.ActiveProfile}";
+                status = LayoutStatus();
                 Changed?.Invoke();
             }
             var next = queuedSwap;
@@ -369,9 +429,9 @@ internal sealed class WindowManager : IDisposable
         activeSwap = null;
         swapWaiting = false;
         settling = null;
+        Interlocked.Increment(ref activationGeneration);
     }
     internal void ResetLayout() { ApplyLayout(1); Changed?.Invoke(); }
-    private readonly Dictionary<nint, (Rectangle Bounds, long Frame, bool Zoomed, int Slot)> observedDrift = [];
     /// <summary>
     /// Reports game-driven layout changes without touching client geometry or styles.
     /// Automatic frame/size corrections can cause WoW to repeatedly resize itself.
@@ -455,12 +515,12 @@ internal sealed class WindowManager : IDisposable
         }
         draft.Validate(); Settings = draft;
     }
+
     /// <summary>
-    /// Runs in the low-level mouse hook, before Windows processes the movement: Windows'
-    /// own tracking is on only while the new position is over an exposed managed window,
-    /// so it can never activate another app.
+    /// True while windows moved by the last swap have not reached their new slots, capped at
+    /// <see cref="SettleTimeoutMs"/> (thread-safe). Clears the settling state once it is over,
+    /// so it is a query with a side effect. Reads window rectangles: never call it under trackingLock.
     /// </summary>
-    /// <summary>True while windows moved by the last swap have not reached their new slots (thread-safe).</summary>
     internal bool LayoutSettling()
     {
         var current = settling;
@@ -470,15 +530,25 @@ internal sealed class WindowManager : IDisposable
         if (done) Interlocked.CompareExchange(ref settling, null, current);
         return !done;
     }
+    /// <summary>
+    /// Runs in the low-level mouse hook, before Windows processes the movement: Windows'
+    /// own tracking is on only while the new position is over an exposed managed window,
+    /// so it can never activate another app. Window and rectangle reads happen before
+    /// trackingLock; the locked section only rechecks published state and makes one system call.
+    /// </summary>
     internal void PointerMoved(Native.Point point)
     {
-        if (SystemTracking == null) return;
+        if (SystemTracking is not { } setTracking) return;
         var state = input;
+        var settlingNow = LayoutSettling();
+        var wanted = !settlingNow && state.MouseFocus && !state.Paused && !state.Editing && !MouseInputHeld() && HoverTarget(point) != 0;
         lock (trackingLock)
         {
-            if (LayoutSettling())
+            // LayoutSettling() already cleared a finished settle, so a non-null value here is a swap
+            // published since the read above: keep tracking off without reading rectangles again.
+            if (settlingNow || settling != null)
             {
-                if (trackingOn) { SystemTracking(false); trackingOn = false; }
+                if (trackingOn) { setTracking(false); trackingOn = false; }
                 return;
             }
             if (trackingHeldAt is { } held)
@@ -486,21 +556,20 @@ internal sealed class WindowManager : IDisposable
                 if (held.X == point.X && held.Y == point.Y) return;
                 trackingHeldAt = null;
             }
-            var on = state.MouseFocus && !state.Paused && !state.Editing && !MouseInputHeld() && HoverTarget(point) != 0;
-            if (on == trackingOn) return;
-            SystemTracking(on);
-            trackingOn = on;
+            if (wanted == trackingOn) return;
+            // A refused change (tracking failed or unavailable) leaves hover to the app's own activation.
+            trackingOn = setTracking(wanted) && wanted;
         }
     }
-    /// <summary>Turns Windows' tracking off until the pointer leaves <paramref name="anchor"/>.</summary>
+    /// <summary>UI thread: turns Windows' tracking off until the pointer leaves <paramref name="anchor"/>.</summary>
     private void HoldTracking(Native.Point? anchor)
     {
-        if (SystemTracking == null) return;
+        if (SystemTracking is not { } setTracking) return;
         lock (trackingLock)
         {
             trackingHeldAt = anchor ?? new Native.Point(int.MinValue, int.MinValue);
             if (!trackingOn) return;
-            SystemTracking(false);
+            setTracking(false);
             trackingOn = false;
         }
     }
@@ -538,6 +607,18 @@ internal sealed class WindowManager : IDisposable
         if (trackingOn) Program.LogLine($"Windows tracking did not activate account {(input.Numbers.TryGetValue(target, out var n) ? n : 0)} within {TrackingGraceMs} ms; activating directly.");
         Activate(target);
     }
+    /// <summary>
+    /// Focus worker: runs an activation queued by <see cref="RequestActivation"/>. Revalidates the
+    /// target against the current snapshot and the generation captured at request time, because
+    /// pause, Settings, a reassignment, an explicit layout or a profile switch may have happened
+    /// while the worker was busy.
+    /// </summary>
+    internal void ActivateQueued(nint target, long generation)
+    {
+        var state = input;
+        if (state.Paused || state.Editing || generation != ActivationGeneration || !IsManaged(target)) return;
+        Activate(target);
+    }
     private void Activate(nint target)
     {
         if (Native.GetForegroundWindow() == target) return;
@@ -563,11 +644,16 @@ internal sealed class WindowManager : IDisposable
     {
         if (!window.Valid) return;
         Native.SetWindowLongPtr(window.Handle, Native.GwlStyle, window.OriginalStyle);
-        Native.SetWindowPos(window.Handle, 0, 0, 0, 0, 0, Native.NoActivate | Native.NoZOrder | Native.FrameChanged | 0x1 | 0x2);
+        Native.SetWindowPos(window.Handle, 0, 0, 0, 0, 0, Native.NoActivate | Native.NoZOrder | Native.FrameChanged | Native.SwpNoSize | Native.SwpNoMove);
         var placement = window.OriginalPlacement;
         Native.SetWindowPlacement(window.Handle, ref placement);
-        if (((long)window.OriginalStyle & 0x10000000) != 0 && !Native.IsWindowVisible(window.Handle))
-            Native.ShowWindow(window.Handle, placement.ShowCmd == 2 ? 7 : placement.ShowCmd == 3 ? 3 : 8);
+        if (((long)window.OriginalStyle & Native.WsVisible) != 0 && !Native.IsWindowVisible(window.Handle))
+            Native.ShowWindow(window.Handle, placement.ShowCmd switch
+            {
+                Native.SwShowMinimized => Native.SwShowMinNoActive,
+                Native.SwShowMaximized => Native.SwShowMaximized,
+                _ => Native.SwShowNa,
+            });
     }
     public void Dispose() { CancelSwaps("exit"); foreach (var window in Accounts.Values) Restore(window); Accounts.Clear(); }
 }

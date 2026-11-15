@@ -12,9 +12,9 @@ if ($Portable) {
 if ($LASTEXITCODE -ne 0) { throw 'Publish failed.' }
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'README.md') -Destination $output
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Install shortcut.cmd'), (Join-Path $PSScriptRoot 'install-shortcut.ps1') -Destination $output
-foreach ($profile in @('5-man','10-man')) {
-    $lines = @('@echo off', 'cd /d "%~dp0"', "start `"`" `"%~dp0WoWWindowKit.exe`" --profile $profile")
-    [IO.File]::WriteAllLines((Join-Path $output "Start $profile.cmd"), $lines, [Text.Encoding]::ASCII)
+foreach ($profileName in @('5-man','10-man')) {
+    $lines = @('@echo off', 'cd /d "%~dp0"', "start `"`" `"%~dp0WoWWindowKit.exe`" --profile $profileName")
+    [IO.File]::WriteAllLines((Join-Path $output "Start $profileName.cmd"), $lines, [Text.Encoding]::ASCII)
 }
 [IO.File]::WriteAllLines((Join-Path $output 'Settings.cmd'), @('@echo off', 'cd /d "%~dp0"', 'start "" "%~dp0WoWWindowKit.exe" --settings'), [Text.Encoding]::ASCII)
 [IO.File]::WriteAllLines((Join-Path $output 'Controls.cmd'), @('@echo off', 'cd /d "%~dp0"', 'start "" "%~dp0WoWWindowKit.exe" --controls'), [Text.Encoding]::ASCII)

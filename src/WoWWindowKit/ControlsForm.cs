@@ -20,7 +20,7 @@ internal sealed class ControlsForm : Form
     {
         this.manager = manager; this.run = run; this.switchProfile = switchProfile;
         this.toggleMouse = toggleMouse; this.togglePause = togglePause;
-        Text = manager.Settings.DisplayName; Font = new Font("Segoe UI", 10);
+        Text = manager.Settings.DisplayName; Font = DarkTheme.CreateFont();
         StartPosition = FormStartPosition.CenterScreen; AutoScaleMode = AutoScaleMode.Dpi;
         Size = new Size(660, 500); MinimumSize = new Size(600, 440); Icon = Program.AppIcon;
         var root = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(14), ColumnCount = 1, RowCount = 7 };
@@ -108,9 +108,7 @@ internal sealed class ControlsForm : Form
         var available = manager.Discover().OrderByDescending(w => w.StartTicks).ToList();
         foreach (var window in available)
         {
-            var assignment = manager.Accounts.FirstOrDefault(p => p.Value.Handle == window.Handle && p.Value.Valid);
-            var state = assignment.Value != null ? $"Slot {assignment.Key}" : manager.IsForgotten(window) ? "Forgotten" : "Unassigned";
-            windows.Items.Add(new WindowChoice(window, $"{(window == available[0] ? "Newest · " : "")}{state} · PID {window.Pid} · {window.Title}"));
+            windows.Items.Add(new WindowChoice(window, manager.Describe(window, newest: window == available[0])));
         }
         windows.SelectedItem = windows.Items.Cast<WindowChoice>().FirstOrDefault(c => c.Window.Handle == selected);
         if (windows.SelectedIndex < 0 && windows.Items.Count > 0) windows.SelectedIndex = 0;

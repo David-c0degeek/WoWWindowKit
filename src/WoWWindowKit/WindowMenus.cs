@@ -16,10 +16,8 @@ internal static class WindowMenus
             foreach (var window in available)
             {
                 var selected = window;
-                var assigned = manager.Accounts.FirstOrDefault(p => p.Value.Handle == selected.Handle && p.Value.Valid);
-                var state = assigned.Value != null ? $"Slot {assigned.Key}" : manager.IsForgotten(selected) ? "Forgotten" : "Unassigned";
-                var newest = selected == available[0] ? "Newest · " : "";
-                var choice = new ToolStripMenuItem($"{newest}{state} · PID {selected.Pid} · {selected.Title.Replace("&", "&&")}")
+                // '&' marks a mnemonic in menu text; titles may contain it.
+                var choice = new ToolStripMenuItem(manager.Describe(selected, newest: selected == available[0]).Replace("&", "&&"))
                     { Checked = current?.Handle == selected.Handle, Tag = selected.Handle };
                 choice.Click += (_, _) => run(() =>
                 {
