@@ -18,6 +18,7 @@ internal static class SelfTest
     private static extern uint SendInput(uint count, ref TestMouseInput input, int size);
     private static readonly List<string> results = [];
     private static readonly List<Process> children = [];
+    private static Action? pumpSwaps;
     private static void Check(bool condition, string name)
     {
         if (!condition) throw new InvalidOperationException("FAIL: " + name);
@@ -26,7 +27,7 @@ internal static class SelfTest
     private static void Pump(int milliseconds = 80)
     {
         var stop = Environment.TickCount64 + milliseconds;
-        while (Environment.TickCount64 < stop) { Application.DoEvents(); Thread.Sleep(10); }
+        while (Environment.TickCount64 < stop) { Application.DoEvents(); pumpSwaps?.Invoke(); Thread.Sleep(10); }
     }
     private static Process StartClient(int number)
     {
@@ -87,6 +88,7 @@ internal static class SelfTest
             var one = StartClient(1); var two = StartClient(2); var three = StartClient(3);
             var eligible = new HashSet<int> { one.Id, two.Id, three.Id };
             manager = new WindowManager(imported, pid => eligible.Contains(pid));
+            pumpSwaps = manager.ProcessSwaps;
             // Live user button state must not make the mock-window assertions nondeterministic.
             manager.MouseInputHeld = static () => false;
             // Do not steal focus or move the pointer during the user's live session.
@@ -117,6 +119,7 @@ internal static class SelfTest
             foreach (var main in new[] { 3, 1, 2, 3, 2, 1 }) manager.Swap(main);
             Pump(200); AssertLayout(1);
             Check(manager.MainAccount == 1, "Rapid async swaps preserve the final logical layout");
+            SwapTests.Run(manager, Check);
             {
                 // Incident: WoW re-adds frame bits even at correct bounds. Polling must not
                 // rewrite that style and trigger another game-driven resize.
@@ -236,10 +239,14 @@ internal static class SelfTest
                 // Swap under a stationary pointer (activation stubbed): tracking must stay off until real movement.
                 requested.Clear();
                 manager.Swap(2); Pump(200);
+                // Activation is stubbed while the user's app runs; expose only our mock main
+                // for the native hit-test without activating any live game window.
+                if (liveApp) { Native.SetWindowPos(manager.Accounts[2].Handle, -1, 0, 0, 0, 0, Native.NoActivate | 0x1 | 0x2); Pump(20); }
                 manager.PointerMoved(point);
                 Check(requested.SequenceEqual([false]), "Keyboard swap holds Windows tracking off under a stationary pointer");
                 manager.PointerMoved(point with { X = point.X + 1 });
                 Check(requested.SequenceEqual([false, true]), "First real mouse movement after a swap re-enables Windows tracking");
+                if (liveApp) Native.SetWindowPos(manager.Accounts[2].Handle, -2, 0, 0, 0, 0, Native.NoActivate | 0x1 | 0x2);
                 manager.Swap(1); manager.PointerMoved(point with { X = point.X + 2 });
                 // Real games resize a frame or more later. Until then the old main is still under the pointer.
                 var realBounds = manager.ReadBounds; var stale = true;
@@ -571,7 +578,7 @@ internal static class SelfTest
                 }
                 else results.Add("SKIP: Synthetic pointer movement while user's app is running.");
             }
-            manager.Dispose(); manager = null; Pump();
+            pumpSwaps = null; manager.Dispose(); manager = null; Pump();
             Check(Native.GetWindowLongPtr(first, Native.GwlStyle) == originalStyle, "Exit restores original window style");
             var restored = new Native.Placement { Length = System.Runtime.InteropServices.Marshal.SizeOf<Native.Placement>() };
             Native.GetWindowPlacement(first, ref restored);
@@ -582,6 +589,7 @@ internal static class SelfTest
         catch (Exception ex) { results.Add(ex.ToString()); File.WriteAllLines(report, results); return 1; }
         finally
         {
+            pumpSwaps = null;
             if (!liveApp) Native.SetCursorPos(originalCursor.X, originalCursor.Y);
             manager?.Dispose();
             foreach (var child in children)

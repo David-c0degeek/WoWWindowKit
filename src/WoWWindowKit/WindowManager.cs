@@ -26,11 +26,11 @@ internal sealed class WindowManager : IDisposable
     private string status = "Waiting for WoW windows";
     private readonly object focusLock = new();
     private readonly Dictionary<int, (long Created, bool Eligible)> processCache = [];
-    internal AppSettings Settings { get => settings; set { settings = value; processCache.Clear(); Publish(); } }
+    internal AppSettings Settings { get => settings; set { CancelSwaps("settings changed"); settings = value; processCache.Clear(); Publish(); } }
     internal Dictionary<int, ManagedWindow> Accounts { get; } = [];
     internal int MainAccount { get; private set; } = 1;
-    internal bool Paused { get => paused; set { paused = value; Publish(); } }
-    internal bool Editing { get => editing; set { editing = value; Publish(); } }
+    internal bool Paused { get => paused; set { if (value) CancelQueuedSwap("paused"); paused = value; Publish(); } }
+    internal bool Editing { get => editing; set { if (value) CancelQueuedSwap("editing"); editing = value; Publish(); } }
     internal string Status => focusRefused ? "Windows refused focus — click a WoW window once, then retry" : status;
     internal string MouseDecision { get; private set; } = "Idle";
     internal InputState Input => input;
@@ -51,9 +51,31 @@ internal sealed class WindowManager : IDisposable
     private sealed record Settling(long Deadline, (nint Handle, Rectangle Bounds)[]? Targets);
     private volatile Settling? settling;
     private List<(nint Handle, Rectangle Bounds)>? recordedMoves;
-    /// <summary>Upper bound for waiting on a game to apply its swap resize.</summary>
+    /// <summary>Upper bound for suppressing hover focus; the swap scheduler has a separate timeout.</summary>
     internal int SettleTimeoutMs = 1000;
     internal Func<nint, Rectangle?> ReadBounds = static handle => Native.GetWindowRect(handle, out var rect) ? rect.Rectangle : null;
+    // Scheduler state belongs to the UI thread. Hover threads read only swapWaiting/settling.
+    private sealed record SwapRequest(long Id, int Account, ManagedWindow Window, long RequestedAt, bool RequireGameForeground);
+    private sealed class SwapTransition(SwapRequest request, long startedAt, (nint Handle, Rectangle Bounds)[] targets)
+    {
+        internal readonly SwapRequest Request = request;
+        internal readonly long StartedAt = startedAt;
+        internal readonly (nint Handle, Rectangle Bounds)[] Targets = targets;
+        internal readonly Dictionary<nint, Rectangle?> Observed = [];
+        internal long? AtTargetSince;
+        internal bool TimedOut;
+    }
+    private SwapTransition? activeSwap;
+    private SwapRequest? queuedSwap;
+    private long swapSequence;
+    private long issuingSwapId;
+    private volatile bool swapWaiting;
+    internal int SwapQuietMs = 50;
+    internal int SwapTimeoutMs = 2000;
+    internal Func<long> SwapClock = static () => Environment.TickCount64;
+    internal Func<nint> ReadForeground = Native.GetForegroundWindow;
+    internal Action<nint, Rectangle> PositionSwapWindow = static (h, b) => Native.Position(h, b, frameChanged: false, asynchronous: true);
+    internal Action<string> TraceSwap = Program.LogLine;
     private long hoverSince;
     private Native.Point? mouseAtSwap;
     private nint lastHover;
@@ -181,6 +203,7 @@ internal sealed class WindowManager : IDisposable
     }
     internal void ApplyLayout(int? main = null, bool swapOnly = false)
     {
+        if (!swapOnly) CancelSwaps("explicit layout");
         var targetMain = main ?? MainAccount;
         var rollback = new List<(ManagedWindow Window, nint Style, Rectangle Bounds)>();
         try
@@ -203,7 +226,12 @@ internal sealed class WindowManager : IDisposable
                 var bounds = Settings.Current.Slots[slot - 1].Bounds;
                 if (swapOnly || styleChanged || before.Rectangle != bounds)
                 {
-                    Native.Position(window.Handle, bounds, styleChanged, asynchronous: swapOnly);
+                    if (swapOnly)
+                    {
+                        TraceSwap($"Swap #{issuingSwapId} move: account {pair.Key}, PID {window.Pid}, {before.Rectangle} -> {bounds}, style 0x{(long)style:X8}.");
+                        PositionSwapWindow(window.Handle, bounds);
+                    }
+                    else Native.Position(window.Handle, bounds, styleChanged);
                     recordedMoves?.Add((window.Handle, bounds));
                 }
             }
@@ -222,9 +250,37 @@ internal sealed class WindowManager : IDisposable
         }
         finally { Publish(); }
     }
-    internal bool Swap(int account)
+    internal bool Swap(int account, bool requireGameForeground = false)
     {
         if (Paused || Editing || account < 1 || account > Settings.Current.Slots.Count || !Accounts.TryGetValue(account, out var window) || !window.Valid) return false;
+        var request = new SwapRequest(++swapSequence, account, window, SwapClock(), requireGameForeground);
+        TraceSwap($"Swap #{request.Id} requested: account {account}, PID {window.Pid}, current main {MainAccount}.");
+        if (activeSwap is { } active)
+        {
+            if (active.TimedOut)
+            {
+                TraceSwap($"Swap #{request.Id} rejected: swap #{active.Request.Id} still has unsettled moves after timeout.");
+                return false;
+            }
+            TraceSwap($"Swap #{request.Id} queued behind #{active.Request.Id}; replaces {(queuedSwap is { } queued ? $"#{queued.Id}" : "none")}.");
+            queuedSwap = request;
+            return true;
+        }
+        StartSwap(request);
+        return true;
+    }
+    private bool RequestValid(SwapRequest request) => !Paused && !Editing
+        && request.Account <= Settings.Current.Slots.Count
+        && Accounts.TryGetValue(request.Account, out var current)
+        && ReferenceEquals(current, request.Window) && current.Valid
+        && (!request.RequireGameForeground || IsManaged(ReadForeground()));
+
+    private void StartSwap(SwapRequest request)
+    {
+        if (!RequestValid(request)) { TraceSwap($"Swap #{request.Id} cancelled: target unavailable or management suspended."); return; }
+        var startedAt = SwapClock();
+        TraceSwap($"Swap #{request.Id} starting: main {MainAccount} -> {request.Account}, queued {startedAt - request.RequestedAt} ms.");
+        issuingSwapId = request.Id;
         Native.Point? anchor;
         lock (focusLock) { anchor = mouseAtSwap = ReadPointer(); lastHover = 0; }
         // Activating the new main reorders windows, and Windows then re-checks the window under the
@@ -233,13 +289,86 @@ internal sealed class WindowManager : IDisposable
         // Games apply the asynchronous resize a frame or more later; until then the old main is
         // still the big window under the pointer, and any hover focus would hand it focus again.
         settling = new Settling(Environment.TickCount64 + SettleTimeoutMs, null);
-        HoldTracking(anchor);
-        Activate(window.Handle);
         recordedMoves = [];
-        try { ApplyLayout(account, swapOnly: true); }
-        finally { settling = new Settling(Environment.TickCount64 + SettleTimeoutMs, [.. recordedMoves]); recordedMoves = null; }
+        try
+        {
+            HoldTracking(anchor);
+            Activate(request.Window.Handle);
+            ApplyLayout(request.Account, swapOnly: true);
+            var targets = recordedMoves.ToArray();
+            activeSwap = targets.Length == 0 ? null : new SwapTransition(request, startedAt, targets);
+            swapWaiting = activeSwap != null;
+            settling = new Settling(Environment.TickCount64 + SettleTimeoutMs, targets);
+            TraceSwap($"Swap #{request.Id} issued: {targets.Length} moves, main {MainAccount}, {SwapClock() - startedAt} ms since start.");
+        }
+        catch
+        {
+            CancelSwaps($"swap #{request.Id} failed");
+            throw;
+        }
+        finally { recordedMoves = null; }
         Changed?.Invoke();
-        return true;
+    }
+
+    /// <summary>UI-thread poll: observes moves, then starts at most one latest queued selection. Never repairs drift.</summary>
+    internal void ProcessSwaps()
+    {
+        if (activeSwap is not { } active) return;
+        var now = SwapClock();
+        var allAtTarget = true;
+        foreach (var target in active.Targets)
+        {
+            // An HWND disappearing or changing owners must not release a deferred account selection.
+            if (!Accounts.Values.Any(w => w.Handle == target.Handle && w.Valid))
+            {
+                CancelSwaps($"swap #{active.Request.Id} lost a managed window");
+                return;
+            }
+            var actual = ReadBounds(target.Handle);
+            if (!active.Observed.TryGetValue(target.Handle, out var before) || before != actual)
+            {
+                active.Observed[target.Handle] = actual;
+                TraceSwap($"Swap #{active.Request.Id} observed HWND {target.Handle}: {actual?.ToString() ?? "unavailable"}, expected {target.Bounds}, elapsed {now - active.StartedAt} ms.");
+            }
+            allAtTarget &= actual == target.Bounds;
+        }
+        if (allAtTarget) active.AtTargetSince ??= now;
+        else active.AtTargetSince = null;
+        if (active.AtTargetSince is { } since && now - since >= SwapQuietMs)
+        {
+            TraceSwap($"Swap #{active.Request.Id} geometry settled: main {MainAccount}, elapsed {now - active.StartedAt} ms, quiet {now - since} ms{(active.TimedOut ? ", after timeout; no queued replay" : "")}.");
+            activeSwap = null;
+            swapWaiting = false;
+            if (active.TimedOut)
+            {
+                status = $"{Accounts.Count(p => p.Key <= Settings.Current.Slots.Count)} / {Settings.Current.Slots.Count} accounts · {Settings.ActiveProfile}";
+                Changed?.Invoke();
+            }
+            var next = queuedSwap;
+            queuedSwap = null;
+            if (next != null) StartSwap(next);
+        }
+        else if (!active.TimedOut && now - active.StartedAt >= SwapTimeoutMs)
+        {
+            active.TimedOut = true;
+            CancelQueuedSwap($"swap #{active.Request.Id} timed out");
+            status = "Swap did not settle — further swaps wait for the pending moves; no automatic resize retry";
+            TraceSwap($"Swap #{active.Request.Id} timed out after {now - active.StartedAt} ms; blocking new swaps until its geometry settles. No resize retry.");
+            Changed?.Invoke();
+        }
+    }
+    private void CancelQueuedSwap(string reason)
+    {
+        if (queuedSwap is { } queued) TraceSwap($"Swap #{queued.Id} cancelled: {reason}.");
+        queuedSwap = null;
+    }
+    private void CancelSwaps(string reason)
+    {
+        CancelQueuedSwap(reason);
+        if (activeSwap is { } active) TraceSwap($"Swap #{active.Request.Id} observation cancelled: {reason}.");
+        activeSwap = null;
+        swapWaiting = false;
+        settling = null;
     }
     internal void ResetLayout() { ApplyLayout(1); Changed?.Invoke(); }
     private readonly Dictionary<nint, (Rectangle Bounds, long Frame, bool Zoomed, int Slot)> observedDrift = [];
@@ -337,7 +466,7 @@ internal sealed class WindowManager : IDisposable
         var current = settling;
         if (current == null) return false;
         var done = Environment.TickCount64 >= current.Deadline
-            || current.Targets is { } targets && targets.All(t => !Native.IsWindow(t.Handle) || ReadBounds(t.Handle) == t.Bounds);
+            || !swapWaiting && current.Targets is { } targets && targets.All(t => !Native.IsWindow(t.Handle) || ReadBounds(t.Handle) == t.Bounds);
         if (done) Interlocked.CompareExchange(ref settling, null, current);
         return !done;
     }
@@ -440,5 +569,5 @@ internal sealed class WindowManager : IDisposable
         if (((long)window.OriginalStyle & 0x10000000) != 0 && !Native.IsWindowVisible(window.Handle))
             Native.ShowWindow(window.Handle, placement.ShowCmd == 2 ? 7 : placement.ShowCmd == 3 ? 3 : 8);
     }
-    public void Dispose() { foreach (var window in Accounts.Values) Restore(window); Accounts.Clear(); }
+    public void Dispose() { CancelSwaps("exit"); foreach (var window in Accounts.Values) Restore(window); Accounts.Clear(); }
 }

@@ -1,5 +1,117 @@
 # Implementation decisions and pre-mortem
 
+## Serialize swaps and measure settling (v1.0.9)
+
+Failed future: a delayed client receives another burst of asynchronous resizes,
+or a queued hotkey fires after Pause/settings/reassignment and changes the wrong
+account. Success with prompt mock windows conceals another DX12 regression.
+
+- PM-7 — High — Overlapping asynchronous transitions. [evidence: Swap replaces
+  settling on every call; ApplyLayout issues asynchronous positions immediately]
+  Permit one active transition. Observe every affected window at its target for
+  a short quiet interval before issuing the latest queued request. Do not count
+  the hover-focus timeout as successful resize completion. On swap timeout drop
+  pending work and retain a fence until the old moves settle; never auto-retry.
+- PM-8 — High — Deferred selection changes semantics or survives cancellation.
+  [evidence: stable Accounts mapping, Paused/Editing, ApplyLayout, Assign/Forget]
+  Store account plus window identity; validate again before execution. Preserve
+  SlotFor mapping and focus only when the corresponding transition actually
+  starts. Cancel queued selections on pause, editing, settings and explicit layout
+  changes. Input hooks remain snapshot-only and never wait for a game.
+- PM-9 — Medium — Diagnostics or tests misrepresent graphics completion.
+  [evidence: gx.log DeviceRecovery; native bounds do not expose GPU completion]
+  Log request IDs, queue replacement, issued moves, observed bounds, elapsed time,
+  cancellation and timeout. Bound logging to events/changed observations. Verify
+  delayed/failing mock positioning, cancellation and latest-wins behavior. Native
+  geometry settling is a heuristic, not proof of DX12 device health. Real-client
+  acceptance and graphics-log correlation remain required.
+
+Guardrails: keep styles out of swaps; no automatic drift correction; preserve
+stationary-pointer and outside-game focus rules, restore-on-exit and settings.
+Build/test a separate candidate while the user's v1.0.8 session is running.
+Verdict: PROCEED WITH GUARDRAILS. Do not restart live clients to run tests.
+
+Implementation: a UI-owned active transition and single replaceable selection
+are serviced by a 25 ms UI timer. Every moved window must report its expected
+rectangle continuously across observations for at least 50 ms. The independent
+one-second hover timeout never releases the scheduler; a two-second swap timeout
+drops the waiting selection and fences new swaps until those moves settle.
+Late completion cannot replay discarded requests. Foreground validation applies
+to hotkey requests; explicit Make main actions retain their existing behavior.
+No new native style changes, drift corrections, input injection or dependencies.
+
+PM-7 resolution: Mitigated. One active batch, partial/jittering geometry tests,
+latest-selection replacement, independent hover timeout and no-retry swap fence.
+Geometry is a heuristic and cannot prove the GPU has released rendering resources.
+PM-8 resolution: Prevented for the tested cancellation/identity paths. Covers
+pause, editing, settings, reset, profile, reassignment, leaving the game, losing a
+managed window, and revalidating the deferred target. Placement failure clears
+the scheduler and preserves the logical main using the existing rollback path.
+PM-9 resolution: Mitigated. Request/move/observation/settlement/timeout logs include
+IDs and elapsed timings; tests inject delayed positioning and controlled time.
+
+Verification: Release and packaged-candidate integration runs each passed 174
+checks. Release build has zero warnings/errors. Four foreground/pointer groups
+were skipped because the user's live app was running; packaged launch/IPC smoke
+checks also remain outstanding because their singleton would target that session.
+The first live-session test attempt exposed a mock hit-test fixture depending on
+the foreground game's Z order; the fixture now exposes only its own mock main
+without activation while the real app runs. No real game client was targeted.
+
+The packaged candidate is artifacts/swap-candidate-1.0.9. Its executable was
+SHA-256 verified and staged in dist for the next launch; the loaded v1.0.8 image
+was renamed to dist/WoWWindowKit.previous-1.0.8-20261115-012830.exe and verified.
+User settings were hash-verified unchanged. PID 38868 and the five WoW clients
+were left running. Fresh-session DX12 acceptance is still outstanding; this is
+not evidence that the descriptor-allocation failure is fixed.
+
+## Live recurrence: graphics-device recovery (2026-11-15)
+
+v1.0.8 remained running (PID 38868) with the same five WoW processes after the
+initial successful test. At approximately 01:05 the user switched from F2 back
+to F1 and reported account 1 at the wrong size. The screenshot and live native
+queries agree: PID 13460 at (0,0), outer size 1827x1353, client size 1813x1339,
+style 0x14050000, extended style 0x00040100, DPI 96, not hung or maximized.
+All four followers retained their exact configured rectangles, style 0x14000000
+and extended style 0x00040000. WoW's Config.wtf already contained
+GxWindowedResolution "1827x1353", last written before this incident.
+
+The shared WoW Logs/gx.log supplies previously missing evidence:
+
+- 01:05:29.645: `OutOfMemory: AllocDescriptors Failed (Prism:(0))` and
+  `OutOfMemory: RTV view create failed (Prism:(0))`.
+- 01:05:29.716: `Device context was lost. Attempting recovery. Occurrence: 1`.
+- 01:05:29.720: `Doing GxRestart. Reason:DeviceRecovery`, then `Dx12 Device Destroy`.
+- 01:05:31.808: `Dx12 Device Create Successful`.
+- 01:05:32.230: WindowKit's passive observer reports account 1 at 1827x1353,
+  expected 1880x1392, with frame bits restored. It performs no correction.
+
+Inference: graphics-device recreation restores the game's saved window size and
+frame, explaining why repeated external frame/size enforcement was a poor repair.
+The shared graphics log does not label the affected process. Timing supports this
+connection but does not prove the source of descriptor exhaustion or whether
+WindowKit's repeated swaps contribute. The report shows 2786 MB used against a
+23370 MB GPU budget; the error must not be summarized as proof that the GPU's
+physical memory is full. Descriptor allocation and total VRAM are different limits.
+
+Evidence preserved in artifacts/live-window-incident-20261115{.json,.log,-gx.log}
+and the user's screenshot preview at artifacts/w1-preview.png. No client, game
+setting or running app was changed during capture. Existing explicit Reapply
+layout remains the immediate recovery action; do not reinstate the periodic
+correction loop. Further verification must cover a real graphics-device reset,
+not just mocked window movement. This recurrence leaves PM-6 inconclusive for
+long-running use and confirms that v1.0.8 contained only the enforcement regression.
+
+Follow-up at 01:10: user tried explicit Reapply layout, saw the correct size
+briefly, then the faulty size returned immediately. The graphics log again
+records descriptor allocation / RTV creation failure at 01:10:36.382, device
+loss occurrence 2 at 01:10:36.391, and device creation success at 01:10:37.988.
+WindowKit reports the same 1827x1353/frame drift at 01:10:38.425. Thus Reapply
+layout is not a working recovery for this session; do not recommend repeating
+it. This recurrence is more specific than a stale geometry/style setting:
+external reapplication coincides with another graphics-device recovery.
+Snapshots: artifacts/live-window-incident-20261115-reapply{.log,-gx.log}.
+
 ## Contain the automatic-layout regression (v1.0.8)
 
 User incident, 2026-11-14: after logging in all clients and quickly selecting

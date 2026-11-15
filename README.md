@@ -107,6 +107,19 @@ account **N** and it moves to the main slot; account **1** moves to slot **N**;
 the previous main returns to its numbered slot. Selecting account **1** restores
 the numbered layout.
 
+Swaps run one transition at a time. During a burst of hotkeys, the latest account
+selection replaces any waiting selection. The next transition starts after all
+affected windows have stayed at their target rectangles for 50 ms. The first
+selection starts immediately; queued selections may wait briefly for the game.
+Pause, Settings and layout/assignment changes discard waiting selections. A
+waiting hotkey is also discarded if you switch away from the game.
+
+If a transition has not settled after two seconds, the app drops the waiting
+selection and blocks further swaps until the pending moves settle. It does not
+retry the resize automatically. `app.log` records numbered swap requests, queue
+replacement, requested/observed bounds, completion times and timeouts. These
+measure window geometry; they do not guarantee the graphics device is healthy.
+
 Edit coordinates and borderless mode in **Settings & layout**, or manually move
 and resize your clients and save their current positions from the tray menu.
 Switching to 5-man restores extra clients and excludes them from focus and
@@ -139,7 +152,9 @@ Automatic layout enforcement has been removed: repeatedly correcting a client's
 frame and size caused unstable resizing during rapid swaps. The app now records
 layout drift in `app.log` without correcting it. Use **Reapply layout / reset main**
 for an explicit layout reset. The original game-driven resize issue remains under
-investigation. To arrange windows by hand for **Save current window positions**,
+investigation; a live incident showed DX12 graphics-device recovery immediately
+before the wrong size returned. If Reapply immediately reverts again, do not keep
+repeating it. To arrange windows by hand for **Save current window positions**,
 pause first.
 
 ## Everyday controls

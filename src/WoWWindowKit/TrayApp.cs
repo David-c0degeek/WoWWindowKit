@@ -20,6 +20,7 @@ internal sealed class TrayApp : ApplicationContext
     private readonly NotifyIcon tray;
     private readonly ContextMenuStrip menu = new();
     private readonly System.Windows.Forms.Timer timer = new() { Interval = 1000 };
+    private readonly System.Windows.Forms.Timer swapTimer = new() { Interval = 25 };
     private readonly HookThread hooks;
     private readonly FocusWorker focus;
     private readonly WindowTracking tracking;
@@ -44,7 +45,7 @@ internal sealed class TrayApp : ApplicationContext
         // Hook callbacks only read a snapshot, post to the UI thread, or wake the focus worker.
         hooks = new HookThread(installed =>
         {
-            installed.Add(new KeyboardHook(manager, account => Post(() => manager.Swap(account)), () => Post(ToggleMouse)));
+            installed.Add(new KeyboardHook(manager, account => Post(() => manager.Swap(account, requireGameForeground: true)), () => Post(ToggleMouse)));
             installed.Add(new MouseHook(point => { manager.PointerMoved(point); focus.Wake(); }));
         });
         manager.Changed = UpdateTray;
@@ -64,7 +65,8 @@ internal sealed class TrayApp : ApplicationContext
             if (!manager.Paused) { manager.Rescan(); manager.ObserveLayout(); }
             UpdateTray();
         });
-        UpdateTray(); Safe(manager.Rescan); timer.Start();
+        swapTimer.Tick += (_, _) => Safe(manager.ProcessSwaps);
+        UpdateTray(); Safe(manager.Rescan); timer.Start(); swapTimer.Start();
     }
     /// <summary>Queues work for the UI thread from any thread without waiting.</summary>
     private void Post(Action action)
@@ -173,8 +175,8 @@ internal sealed class TrayApp : ApplicationContext
         if (!disposed)
         {
             // Stop input threads before windows are restored so nothing re-activates them.
-            disposed = true; hooks.Dispose(); focus.Dispose(); tracking.Dispose(); editor?.Close(); controls.Dispose(); timer.Stop(); manager.Dispose();
-            tray.Visible = false; tray.Dispose(); timer.Dispose(); menu.Dispose(); commands.Dispose(); dispatcher.Dispose();
+            disposed = true; swapTimer.Stop(); hooks.Dispose(); focus.Dispose(); tracking.Dispose(); editor?.Close(); controls.Dispose(); timer.Stop(); manager.Dispose();
+            tray.Visible = false; tray.Dispose(); timer.Dispose(); swapTimer.Dispose(); menu.Dispose(); commands.Dispose(); dispatcher.Dispose();
         }
         base.ExitThreadCore();
     }
