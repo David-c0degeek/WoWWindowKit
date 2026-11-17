@@ -40,6 +40,7 @@ internal static class SelfTest
         ("controls-ui", ControlsUiGroup),
         ("hooks", HooksGroup),
         ("live-tracking", LiveTrackingGroup),
+        ("restart", RestartGroup),
     ];
 
     private static void Check(bool condition, string name)
@@ -702,6 +703,155 @@ internal static class SelfTest
         Check(manager.Accounts[2].Pid == context.Three.Id && manager.Accounts[3].Pid == replacement.Id, "Manual account assignment exchanges identities");
         manager.SwitchProfile("5-man"); Pump();
         Check(!manager.IsManaged(manager.Accounts[10].Handle), "5-man excludes extra clients from mouse focus and hotkeys");
+    }
+
+/// <summary>Restart this client: close one client, reserve its account, adopt the next new client, touch nothing else.</summary>
+    private static void RestartGroup(Context context)
+    {
+        var manager = context.Windows();
+        if (manager.Settings.ActiveProfile != "5-man") { manager.SwitchProfile("5-man"); Pump(); }
+        var eligible = context.Eligible;
+        manager.Rescan();
+        for (var n = 1; n <= 3; n++)
+            if (!manager.Accounts.ContainsKey(n)) { eligible.Add(StartClient(n).Id); manager.Rescan(); }
+        manager.ResetLayout(); Pump();
+        var defaultClose = manager.CloseClient;
+        void ResetCounters() { foreach (var w in manager.Accounts.Values) Native.SendMessage(w.Handle, TestClientForm.CounterMessage, 2, 0); }
+        bool Untouched(IEnumerable<ManagedWindow> windows) => windows.All(w => Native.SendMessage(w.Handle, TestClientForm.CounterMessage, 0, 0) == 0 && Native.SendMessage(w.Handle, TestClientForm.CounterMessage, 1, 0) == 0);
+        Rectangle Bounds(ManagedWindow w) { Native.GetWindowRect(w.Handle, out var r); return r.Rectangle; }
+        bool Refused(Action action) { try { action(); return false; } catch (InvalidOperationException) { return true; } }
+
+        // Non-main restart; a client started before the restart (titled "WoW 2") must not take account 2.
+        var decoy = StartClient(2);
+        var old = manager.Accounts[2];
+        var others = manager.Accounts.Where(p => p.Key != 2).Select(p => p.Value).ToList();
+        ResetCounters();
+        Check(Refused(() => manager.BeginRestart(2, others[0])) && manager.RestartingAccount == null && ReferenceEquals(manager.Accounts[2], old),
+            "Restart refuses when the slot no longer holds the confirmed client");
+        manager.BeginRestart(2, old);
+        Check(manager.RestartingAccount == 2 && !manager.Accounts.ContainsKey(2) && !manager.Input.Managed.ContainsKey(old.Handle) && !manager.Swap(2),
+            "Restart detaches only the chosen account and removes it from keys and hover");
+        Check(Refused(() => manager.BeginRestart(3)) && Refused(manager.ResetLayout) && Refused(() => manager.Forget(3)) && Refused(() => manager.SwitchProfile("10-man"))
+            && Refused(() => manager.Assign(4, others[0].Handle)) && manager.Settings.ActiveProfile == "5-man" && manager.RestartingAccount == 2,
+            "A pending restart blocks other restarts, layout, forget, assign and profile changes without side effects");
+        Process.GetProcessById(old.Pid).WaitForExit(5000); Pump(); manager.Rescan();
+        Check(manager.RestartAwaitingClient && !manager.Accounts.Values.Any(w => w.Pid == old.Pid), "Restart sees the old client exit and waits for a new one");
+        eligible.Add(decoy.Id); manager.Rescan(); Pump();
+        Check(!manager.Accounts.ContainsKey(2) && manager.RestartAwaitingClient, "A client started before the restart never takes the reserved account");
+        var decoyAccount = manager.Accounts.FirstOrDefault(p => p.Value.Pid == decoy.Id).Key;
+        Check(decoyAccount == 0 || Bounds(manager.Accounts[decoyAccount]) == manager.Settings.Current.Slots[decoyAccount - 1].Bounds, "A client discovered during a restart is placed in its own slot");
+        var replacement = StartClient(7); eligible.Add(replacement.Id); manager.Rescan(); Pump();
+        Check(manager.RestartingAccount == null && manager.Accounts[2].Pid == replacement.Id && Bounds(manager.Accounts[2]) == manager.Settings.Current.Slots[1].Bounds,
+            "The next new client takes the restarted account and its slot");
+        Check(Untouched(others), "From close to adoption, including other discovery, no other client gets a position or style change");
+        if (decoyAccount != 0) manager.Forget(decoyAccount);
+        manager.ResetLayout(); Pump();
+
+        // Restarting the main client keeps the main account and returns the new client to slot 1.
+        manager.Swap(3); Pump(400);
+        Check(manager.MainAccount == 3, "Account 3 is main before its restart");
+        old = manager.Accounts[3];
+        others = manager.Accounts.Values.Where(w => w != old).ToList();
+        var otherBounds = others.ToDictionary(w => w.Handle, Bounds);
+        ResetCounters();
+        manager.BeginRestart(3);
+        Process.GetProcessById(old.Pid).WaitForExit(5000); Pump(); manager.Rescan();
+        Check(manager.MainAccount == 3 && !manager.Accounts.ContainsKey(3) && manager.RestartAwaitingClient, "Restarting the main client keeps it the main account");
+        replacement = StartClient(8); eligible.Add(replacement.Id); manager.Rescan(); Pump();
+        Check(manager.MainAccount == 3 && manager.Accounts[3].Pid == replacement.Id && Bounds(manager.Accounts[3]) == manager.Settings.Current.Slots[0].Bounds,
+            "The restarted main client returns to the main slot");
+        // Closing the focused client lets Windows activate another one (a Z-order message the kit does
+        // not send), so here geometry and style writes are checked rather than every position message.
+        Check(others.All(w => Bounds(w) == otherBounds[w.Handle] && Native.SendMessage(w.Handle, TestClientForm.CounterMessage, 1, 0) == 0),
+            "Restarting the main client moves and restyles no other client");
+        manager.ResetLayout(); Pump();
+
+        // A client that ignores the close request: offered once; Keep it restores the exact mapping.
+        manager.CloseClient = static _ => true;
+        manager.RestartForceAfterMs = 0;
+        old = manager.Accounts[2];
+        var everyone = manager.Accounts.Values.ToList();
+        ResetCounters();
+        manager.BeginRestart(2);
+        Check(manager.ForceEndDue() == old.Pid && manager.ForceEndDue() == null, "A client that does not close is offered for ending once");
+        manager.CancelRestart();
+        Check(manager.RestartingAccount == null && ReferenceEquals(manager.Accounts[2], old) && manager.MainAccount == 1 && manager.Input.Managed.ContainsKey(old.Handle) && Untouched(everyone),
+            "Keeping a client that did not close restores its account with no window changes");
+        manager.RestartTimeoutMs = 0;
+        manager.BeginRestart(2); manager.Rescan();
+        Check(manager.RestartingAccount == null && ReferenceEquals(manager.Accounts[2], old) && manager.Status.Contains("expired", StringComparison.Ordinal) && manager.Status.Contains($"PID {old.Pid}", StringComparison.Ordinal),
+            "An expired restart restores a still-running client to its account and says so");
+        manager.RestartTimeoutMs = 10 * 60 * 1000;
+        manager.BeginRestart(2);
+        Check(manager.ForceEndDue() == old.Pid, "Force-end offered for the restart");
+        using (var oldProcess = Process.GetProcessById(old.Pid))
+        {
+            manager.ForceEndRestart();
+            Check(oldProcess.WaitForExit(5000), "End process ends only the restarting client");
+        }
+        manager.Rescan();
+        Check(manager.RestartAwaitingClient && manager.Accounts.Values.All(w => w.Valid), "Other clients keep running after a forced end");
+        manager.CancelRestart(); manager.Rescan();
+        Check(manager.RestartingAccount == null && !manager.Accounts.ContainsKey(2) && manager.Status.Contains("Catch / assign", StringComparison.Ordinal), "Cancelling after the client exited leaves the slot empty and says what to do");
+        Check(Refused(() => manager.BeginRestart(2)) && manager.RestartingAccount == null, "Restart refuses an empty slot without side effects");
+        manager.CloseClient = defaultClose;
+        manager.RestartForceAfterMs = 20000;
+        eligible.Add(StartClient(2).Id); manager.Rescan(); Pump();
+        Check(manager.Accounts.ContainsKey(2), "Normal discovery refills the slot after a cancelled restart");
+
+        // Detection: repeated frame-restored drift is reported, and observing writes nothing.
+        manager.ResetLayout(); Pump();
+        var watched = manager.Accounts[3];
+        void GameRestoresFrame(int width)
+        {
+            var style = (long)Native.GetWindowLongPtr(watched.Handle, Native.GwlStyle) | 0x00C00000;
+            Native.SetWindowLongPtr(watched.Handle, Native.GwlStyle, (nint)style);
+            var slot = manager.Settings.Current.Slots[2].Bounds;
+            Native.Position(watched.Handle, new Rectangle(slot.X, slot.Y, width, slot.Height + 20), frameChanged: true);
+            Pump();
+            ResetCounters();
+            manager.ObserveLayout();
+        }
+        GameRestoresFrame(200);
+        Check(!manager.GraphicsResetSuspected(watched) && Untouched(manager.Accounts.Values), "One frame-restored observation is logged but not yet reported");
+        ResetCounters(); manager.ObserveLayout();
+        Check(manager.GraphicsResetSuspected(watched) && Untouched(manager.Accounts.Values), "Frame-restored drift seen in two samples, even unchanged, is reported as a suspected graphics reset, with no writes");
+        manager.ResetLayout(); Pump();
+
+        // Controls: confirmation gates the restart; the same button cancels it.
+        manager.CloseClient = static _ => true;
+        var answer = false;
+        using (var panel = new ControlsForm(manager, action => action(), _ => { }, () => { }, () => { }, () => { }, () => { }, _ => answer))
+        {
+            panel.Show(); Pump();
+            var rows = (DataGridView)panel.Controls.Find("controlSlots", true).Single();
+            var button = (Button)panel.Controls.Find("controlRestart", true).Single();
+            Check(rows.Rows[2].Cells[2].Value?.ToString()?.Contains("suspected graphics reset", StringComparison.Ordinal) == true, "Controls name the client with a suspected graphics reset");
+            rows.CurrentCell = rows.Rows[1].Cells[0];
+            button.PerformClick();
+            Check(manager.RestartingAccount == null, "Declining the confirmation leaves the client alone");
+            // The confirmation runs a nested message loop: the slot can change before Yes returns.
+            var confirmed = manager.Accounts[2];
+            var swappedIn = manager.Accounts[3];
+            using (var swapped = new ControlsForm(manager, action => { try { action(); } catch (InvalidOperationException) { } }, _ => { }, () => { }, () => { }, () => { }, () => { },
+                _ => { manager.Assign(2, swappedIn.Handle); return true; }))
+            {
+                swapped.Show(); Pump();
+                var swappedRows = (DataGridView)swapped.Controls.Find("controlSlots", true).Single();
+                swappedRows.CurrentCell = swappedRows.Rows[1].Cells[0];
+                ((Button)swapped.Controls.Find("controlRestart", true).Single()).PerformClick();
+            }
+            Check(manager.RestartingAccount == null && confirmed.Valid && swappedIn.Valid && ReferenceEquals(manager.Accounts[2], swappedIn),
+                "A slot changed during confirmation closes neither client");
+            manager.Assign(2, confirmed.Handle); Pump();
+            rows.CurrentCell = rows.Rows[1].Cells[0];
+            answer = true; button.PerformClick();
+            Check(manager.RestartingAccount == 2 && button.Text == "Cancel restart" && rows.Rows[1].Cells[2].Value?.ToString()?.StartsWith("Restarting", StringComparison.Ordinal) == true,
+                "Confirmed Restart client starts the restart and shows it");
+            button.PerformClick();
+            Check(manager.RestartingAccount == null && manager.Accounts.ContainsKey(2) && button.Text == "Restart client", "Cancel restart returns the client to its slot");
+        }
+        manager.CloseClient = defaultClose;
     }
 
     private static void ControlsUiGroup(Context context)

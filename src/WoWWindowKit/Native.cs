@@ -26,7 +26,8 @@ internal static class Native
     internal const uint WmCopyData = 0x4A, WmQuit = 0x12, WmWindowPosChanged = 0x47, WmStyleChanged = 0x7D;
     internal const int WmKeyDown = 0x100, WmKeyUp = 0x101, WmSysKeyDown = 0x104, WmSysKeyUp = 0x105;
     internal const int WmMouseMove = 0x200, WmLButtonUp = 0x202, WmRButtonUp = 0x205, WmMButtonUp = 0x208, WmXButtonUp = 0x20C;
-    internal const uint ProcessQueryLimitedInformation = 0x1000;
+    internal const uint ProcessQueryLimitedInformation = 0x1000, ProcessTerminate = 0x1, Synchronize = 0x00100000, WaitObject0 = 0;
+    internal const uint WmClose = 0x10;
     internal const uint SmtoAbortIfHung = 0x2;
 
     internal delegate bool EnumProc(nint window, nint data);
@@ -65,6 +66,9 @@ internal static class Native
     [DllImport("kernel32.dll")] internal static extern uint GetCurrentThreadId();
     [DllImport("kernel32.dll")] internal static extern nint OpenProcess(uint access, bool inherit, int pid);
     [DllImport("kernel32.dll")] internal static extern bool CloseHandle(nint handle);
+    [DllImport("kernel32.dll")] internal static extern uint WaitForSingleObject(nint handle, uint milliseconds);
+    [DllImport("kernel32.dll")] internal static extern bool TerminateProcess(nint process, uint exitCode);
+    [DllImport("user32.dll")] internal static extern bool PostMessage(nint window, uint message, nint wp, nint lp);
     [DllImport("kernel32.dll")] internal static extern bool GetProcessTimes(nint process, out long created, out long exited, out long kernel, out long user);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] internal static extern bool QueryFullProcessImageName(nint process, uint flags, StringBuilder name, ref int size);
     [DllImport("user32.dll", SetLastError = true)] internal static extern bool SystemParametersInfo(uint action, uint param, nint value, uint winIni);

@@ -85,6 +85,7 @@ internal sealed class TrayApp : ApplicationContext
         timer.Tick += (_, _) => Safe(() =>
         {
             if (!manager.Paused) { manager.Rescan(); manager.ObserveLayout(); }
+            if (editor == null && manager.ForceEndDue() is { } pid) AskForceEnd(pid);
             UpdateTray();
         });
         swapTimer.Tick += (_, _) => Safe(manager.ProcessSwaps);
@@ -151,6 +152,16 @@ internal sealed class TrayApp : ApplicationContext
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Exit and restore windows", null, (_, _) => ExitThread());
     }
+    /// <summary>Asked once per restart when the old client ignores the close request.</summary>
+    private void AskForceEnd(int pid)
+    {
+        var account = manager.RestartingAccount;
+        var end = DarkTheme.Confirm(controls.Visible ? controls : null,
+            $"WoW for account {account} (PID {pid}) has not closed {manager.RestartForceAfterMs / 1000} seconds after Restart client.\r\n\r\nEnd that process now? Only this client is ended. Keep it cancels the restart and leaves it in its slot.",
+            manager.Settings.DisplayName, "End process", "Keep it");
+        if (end) manager.ForceEndRestart();
+        else manager.CancelRestart();
+    }
     private void SaveCurrentPositions()
     {
         manager.SaveCurrentPositions();
@@ -201,6 +212,7 @@ internal sealed class TrayApp : ApplicationContext
         Safe(() =>
         {
             if (editor is { IsDisposed: false }) { ActivateOwn(editor); return; }
+            if (manager.RestartingAccount is { } restarting) throw new InvalidOperationException($"Account {restarting} is restarting. Wait for its new WoW window, or click Cancel restart, before opening Settings.");
             manager.Editing = true;
             try
             {

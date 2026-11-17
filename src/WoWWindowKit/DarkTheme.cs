@@ -70,6 +70,21 @@ internal static class DarkTheme
         Apply(dialog); dialog.Shown += (_, _) => Native.ShowWindow(dialog.Handle, Native.SwShowNormal);
         dialog.ShowDialog(owner);
     }
+    /// <summary>A dark Yes/No question; true only when the first button is chosen.</summary>
+    internal static bool Confirm(IWin32Window? owner, string message, string title, string yes, string no)
+    {
+        using var dialog = new Form { Text = title, Font = CreateFont(), Size = new Size(560, 280), MinimumSize = new Size(440, 220), StartPosition = owner == null ? FormStartPosition.CenterScreen : FormStartPosition.CenterParent, MinimizeBox = false, MaximizeBox = false };
+        var panel = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(18), RowCount = 2, ColumnCount = 1 };
+        panel.RowStyles.Add(new RowStyle(SizeType.Percent, 100)); panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
+        panel.Controls.Add(new TextBox { Text = message, Multiline = true, ReadOnly = true, BorderStyle = BorderStyle.None, Dock = DockStyle.Fill, ScrollBars = ScrollBars.Vertical, TabStop = false }, 0, 0);
+        var buttons = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.RightToLeft, WrapContents = false };
+        var cancel = new Button { Text = no, DialogResult = DialogResult.Cancel, AutoSize = true, MinimumSize = new Size(90, 32) };
+        var accept = new Button { Text = yes, DialogResult = DialogResult.OK, AutoSize = true, MinimumSize = new Size(90, 32) };
+        buttons.Controls.AddRange([cancel, accept]);
+        panel.Controls.Add(buttons, 0, 1); dialog.Controls.Add(panel); dialog.AcceptButton = accept; dialog.CancelButton = cancel;
+        Apply(dialog); dialog.Shown += (_, _) => { Native.ShowWindow(dialog.Handle, Native.SwShowNormal); cancel.Focus(); };
+        return dialog.ShowDialog(owner) == DialogResult.OK;
+    }
     private sealed class DarkColors : ProfessionalColorTable
     {
         public override Color ToolStripDropDownBackground => Background;

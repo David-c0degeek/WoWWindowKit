@@ -52,10 +52,83 @@ window (`Program.ControlWindowName`). Later launches send `WM_COPYDATA` with a
 `ControlCommand` and an optional profile name; the running instance switches to
 any existing profile and warns about unknown names.
 
+Client restart: one UI-owned reservation (`WindowManager.restart`) holds the old
+client's process handle, blocks conflicting layout and assignment actions, and is
+serviced by `Rescan` on the 1 s discovery timer. Only the restarted client's window
+is written to (WM_CLOSE, then `PlaceAccount` for its replacement).
+
 Shutdown order (`TrayApp.ExitThreadCore`): stop the swap timer, remove the hooks,
 stop the focus worker, restore Windows tracking, close the editor and controls,
 stop discovery, restore every managed window, then dispose the tray, timers and
 the IPC window.
+
+## Restart this client (v1.0.11)
+
+Incident, 2026-11-17: account 1 (PID 50256) hit `AllocDescriptors` / `RTV view
+create failed` and `Device context was lost` in gx.log right after two swaps 1.2 s
+apart (15:34:37 and 15:34:38). From then on every resize of that client caused
+another device loss (occurrences 2 to 9 by 15:35:53), and it kept returning to
+2530x1353 / 2544x1367 with its frame back. The other four clients resized normally.
+GPU memory was 2225 MB of a 23370 MB budget, so this is a descriptor limit, not
+VRAM. As on 2026-11-15, only a new process recovers the client. The user does not
+want `gxApi d3d11`.
+
+Decision (user, 2026-11-17): WoWWindowKit has never launched WoW and does not start.
+It closes the stuck client, the user starts WoW again and logs in, and the kit puts
+the next new client in the reserved place. No command lines are captured or logged.
+
+Design (paired with Codex as navigator):
+
+- `BeginRestart(n)` opens the old process (SYNCHRONIZE and query only) and
+  checks its creation time against the managed identity before doing anything.
+  It cancels the active and queued swap, removes only account n (no Restore, no
+  layout pass, MainAccount unchanged) and posts WM_CLOSE to that window.
+- The process handle stays open for the whole reservation, so PID reuse cannot
+  redirect the exit check or a forced end. After 20 s the tray asks once whether to
+  end the process; only then is it opened for termination (by PID, creation time
+  checked again), so a client that cannot be ended can still close normally.
+  **Keep it** puts back the exact
+  ManagedWindow under account n, with no layout pass.
+- Discovery keeps the old client out of every slot, never gives account n to any
+  other window (numbered titles and free-slot filling skip it), and holds windows
+  whose process was created after the restart began. Once the old process has
+  exited, the earliest of those becomes account n and `PlaceAccount` styles and
+  positions that one window in its current slot (main slot if n is main).
+- A pending restart blocks Assign, Forget, Reapply layout, profile switches,
+  Settings and a second restart. While it is pending (and in the scan that
+  completes it) discovery places only newly assigned clients, one at a time,
+  never runs the all-account layout pass, and keeps the main account when another
+  client exits.
+- It expires after 10 minutes; a still-running old client then keeps its slot.
+  Expiry and cancellation are shown in the status line with what to do next.
+- The confirmation names one client and runs a nested message loop, so
+  `BeginRestart` takes that client and refuses if the slot changed meanwhile.
+- Detection is observation only (PM-5 kept): when Borderless is on and the game
+  puts frame bits back, each 1 s observation sample that still sees them is counted
+  for that client identity (unchanged drift counts too, though it is logged once);
+  at two the controls and app.log report a *suspected* graphics reset.
+  Frame bits alone do not prove a device loss, so the text says "restart may help".
+
+Residual risk: the kit cannot verify which account a new client logs into. If the
+user starts two WoW clients while a restart is pending, the first one created takes
+the reserved account; app.log records its PID and Catch / assign corrects it.
+
+Not done: spacing rapid swaps that resize the same client (handoff item 3). The
+evidence is one sequence: the earlier swap had settled 141 ms after it started,
+and the second came 1.2 s later. An extra delay would slow every swap. Revisit if
+more device losses follow closely spaced swaps.
+
+PM-6 stands: mock clients close and reopen promptly; real-client acceptance of
+the restart (WoW's close behaviour, login, first placement at startup) is outstanding.
+
+Verification: new self-test group `restart` (28 checks) covers non-main and main
+restarts with message/geometry counters on every other client, a pre-existing
+"WoW 2" window not taking account 2, the blocked actions, the one-time force-end
+offer, Keep it, expiry, forced end, cancellation after exit, refusal for an empty
+slot, a slot changed during the confirmation, the status after expiry and cancellation,
+a client discovered mid-restart being placed alone, the two-sample detection without writes, and the Controls button with
+confirmation. Closing the focused main lets Windows activate another client, so
+that case checks geometry and style counters instead of every position message.
 
 ## Audit remediation (v1.0.10)
 

@@ -36,12 +36,16 @@ internal sealed class WindowManager : IDisposable
     /// <summary>Moves issued by the swap currently being started (null outside StartSwap).</summary>
     private List<(nint Handle, Rectangle Bounds)>? recordedMoves;
     private readonly Dictionary<nint, (Rectangle Bounds, long Frame, bool Zoomed, int Slot)> observedDrift = [];
+    /// <summary>Separate samples, per client identity, in which the game had put its window frame back.</summary>
+    private readonly Dictionary<(nint Handle, int Pid, long Start), int> frameRestored = [];
+    /// <summary>Frame-restored samples before a client is reported as a suspected graphics reset.</summary>
+    internal const int SuspectGraphicsResetAfter = 2;
     internal AppSettings Settings { get => settings; set { CancelSwaps("settings changed"); settings = value; processCache.Clear(); Publish(); } }
     internal Dictionary<int, ManagedWindow> Accounts { get; } = [];
     internal int MainAccount { get; private set; } = 1;
     internal bool Paused { get => paused; set { if (value) CancelQueuedSwap("paused"); paused = value; Publish(); } }
     internal bool Editing { get => editing; set { if (value) CancelQueuedSwap("editing"); editing = value; Publish(); } }
-    internal string Status => focusRefused ? "Windows refused focus — click a WoW window once, then retry" : status;
+    internal string Status => focusRefused ? "Windows refused focus — click a WoW window once, then retry" : RestartStatus ?? status;
     internal Action? Changed;
 
     // ---- Swap scheduler: UI thread only (25 ms timer). Hover threads read only swapWaiting/settling. ----
@@ -115,6 +119,38 @@ internal sealed class WindowManager : IDisposable
     internal Func<nint> ReadForeground = Native.GetForegroundWindow;
     internal Action<nint, Rectangle> PositionSwapWindow = static (h, b) => Native.Position(h, b, frameChanged: false, asynchronous: true);
     internal Action<string> TraceSwap = Program.LogLine;
+
+    // ---- Client restart: UI thread only. One reservation at a time (see "Restart this client"
+    // in docs/implementation.md). The kit closes the client; the user starts WoW again and logs in. ----
+    private sealed class PendingRestart(int account, ManagedWindow old, nint process, long since, long closedAt)
+    {
+        internal readonly int Account = account;
+        internal readonly ManagedWindow Old = old;
+        /// <summary>Held open until the reservation ends, so the PID cannot be reused under it.</summary>
+        internal readonly nint Process = process;
+        /// <summary>UTC ticks, the same clock as <see cref="ManagedWindow.StartTicks"/>.</summary>
+        internal readonly long Since = since;
+        internal readonly long ClosedAt = closedAt;
+        internal long? ExitedAt;
+        internal bool ForceOffered;
+    }
+    private PendingRestart? restart;
+    /// <summary>How long the old client gets to close before the user is asked to end it.</summary>
+    internal int RestartForceAfterMs = 20000;
+    /// <summary>How long a reservation waits for the old client to close and a new one to open.</summary>
+    internal int RestartTimeoutMs = 10 * 60 * 1000;
+    internal Func<long> RestartClock = static () => Environment.TickCount64;
+    /// <summary>Asks the client to close (WM_CLOSE); tests replace it to simulate a client that ignores it.</summary>
+    internal Func<nint, bool> CloseClient = static window => Native.PostMessage(window, Native.WmClose, 0, 0);
+    internal int? RestartingAccount => restart?.Account;
+    /// <summary>True once the old client has exited and the reservation waits for the next WoW client.</summary>
+    internal bool RestartAwaitingClient => restart is { ExitedAt: not null };
+    private string? RestartStatus => restart switch
+    {
+        null => null,
+        { ExitedAt: null } r => $"Account {r.Account}: closing WoW (PID {r.Old.Pid})…",
+        var r => $"Account {r.Account}: start WoW and log in — the next WoW client that opens takes account {r.Account}'s place",
+    };
 
     private static (nint Handle, int Pid, long Start) Identity(ManagedWindow window) => (window.Handle, window.Pid, window.StartTicks);
     internal bool IsForgotten(ManagedWindow window) => forgotten.Contains(Identity(window));
@@ -201,8 +237,13 @@ internal sealed class WindowManager : IDisposable
     private void RescanCore()
     {
         forgotten.RemoveWhere(id => !Native.IsWindow(id.Handle) || Native.GetWindowThreadProcessId(id.Handle, out var pid) == 0 || pid != id.Pid);
+        RefreshRestart();
+        var reserved = restart;
         var candidates = Discover().Where(w => !IsForgotten(w)).ToList();
+        // The client being restarted stays out of every slot until it exits or the restart is cancelled.
+        if (reserved != null) candidates.RemoveAll(w => w.Pid == reserved.Old.Pid && w.StartTicks == reserved.Old.StartTicks);
         var changed = false;
+        var added = new List<int>();
         foreach (var pair in Accounts.ToArray())
         {
             // Do not recycle account numbers when another account exits.
@@ -210,32 +251,48 @@ internal sealed class WindowManager : IDisposable
             {
                 if (pair.Value.Valid) Restore(pair.Value);
                 Accounts.Remove(pair.Key);
-                if (MainAccount == pair.Key) MainAccount = 1;
+                // During a restart nothing else moves, so the main account stays as it was.
+                if (MainAccount == pair.Key && reserved == null) MainAccount = 1;
                 changed = true;
             }
         }
         // Numbered titles from the previous tool are useful on first attachment.
         var unassigned = candidates.Where(w => Accounts.Values.All(a => a.Handle != w.Handle)).ToList();
+        if (reserved != null)
+        {
+            // Clients started after the restart began are held for it, earliest first. Earlier
+            // windows keep the normal rules but can never take the reserved account number.
+            var fresh = unassigned.Where(w => w.StartTicks > reserved.Since).ToList();
+            unassigned.RemoveAll(fresh.Contains);
+            if (reserved.ExitedAt != null && fresh.Count > 0) AdoptRestart(reserved, fresh[0]);
+        }
         foreach (var window in unassigned.ToArray())
         {
             var match = Regex.Match(window.Title, @"^(?:WoW|WOB)\s*(\d+)$", RegexOptions.IgnoreCase);
-            if (match.Success && int.TryParse(match.Groups[1].Value, out var number) && number is >= 1 and <= 10 && !Accounts.ContainsKey(number))
+            if (match.Success && int.TryParse(match.Groups[1].Value, out var number) && number is >= 1 and <= 10 && !Accounts.ContainsKey(number) && number != restart?.Account)
             {
                 Accounts[number] = window;
                 unassigned.Remove(window);
+                added.Add(number);
                 changed = true;
             }
         }
         foreach (var window in unassigned)
         {
-            var free = Enumerable.Range(1, Settings.Current.Slots.Count).FirstOrDefault(n => !Accounts.ContainsKey(n));
+            var free = Enumerable.Range(1, Settings.Current.Slots.Count).FirstOrDefault(n => !Accounts.ContainsKey(n) && n != restart?.Account);
             if (free == 0) break;
             Accounts[free] = window;
+            added.Add(free);
             changed = true;
         }
         if (changed)
         {
-            if (!Paused) ApplyLayout();
+            // While a restart is pending (or completed in this scan) only newly assigned clients
+            // are placed: a full layout pass would write to every other client, including one
+            // whose graphics device is failing.
+            if (Paused) { }
+            else if (reserved != null) foreach (var account in added) PlaceAccount(account, Accounts[account]);
+            else ApplyLayout();
             Changed?.Invoke();
         }
     }
@@ -431,7 +488,7 @@ internal sealed class WindowManager : IDisposable
         settling = null;
         Interlocked.Increment(ref activationGeneration);
     }
-    internal void ResetLayout() { ApplyLayout(1); Changed?.Invoke(); }
+    internal void ResetLayout() { RequireNoRestart("reapplying the layout"); ApplyLayout(1); Changed?.Invoke(); }
     /// <summary>
     /// Reports game-driven layout changes without touching client geometry or styles.
     /// Automatic frame/size corrections can cause WoW to repeatedly resize itself.
@@ -441,6 +498,7 @@ internal sealed class WindowManager : IDisposable
     {
         if (Paused || Editing || MouseInputHeld() || LayoutSettling()) return;
         foreach (var stale in observedDrift.Keys.Where(h => !Accounts.Values.Any(w => w.Handle == h)).ToArray()) observedDrift.Remove(stale);
+        foreach (var stale in frameRestored.Keys.Where(id => !Accounts.Values.Any(w => Identity(w) == id)).ToArray()) frameRestored.Remove(stale);
         foreach (var pair in Accounts)
         {
             var window = pair.Value;
@@ -459,6 +517,18 @@ internal sealed class WindowManager : IDisposable
                 observedDrift.Remove(window.Handle);
                 continue;
             }
+            // WoW puts its frame back when it recreates its window, as after a DX12 device loss.
+            // Frame bits alone do not prove that, so it is reported only once two separate
+            // samples (timer ticks) have seen it, whether or not the drift changed in between.
+            if (Settings.Borderless && (style & Native.BorderMask) != 0)
+            {
+                var count = frameRestored[Identity(window)] = frameRestored.GetValueOrDefault(Identity(window)) + 1;
+                if (count == SuspectGraphicsResetAfter)
+                {
+                    Program.LogLine($"Account {pair.Key}, PID {window.Pid}: the game's window frame was back in {count} separate samples. Suspected graphics reset; Restart client may help. No automatic correction.");
+                    Changed?.Invoke();
+                }
+            }
             var observation = (actual, style & Native.BorderMask, zoomed, slot);
             if (observedDrift.TryGetValue(window.Handle, out var previous) && previous == observation) continue;
             observedDrift[window.Handle] = observation;
@@ -467,6 +537,7 @@ internal sealed class WindowManager : IDisposable
     }
     internal void SwitchProfile(string name)
     {
+        RequireNoRestart("switching profiles");
         var previous = Settings.ActiveProfile;
         Settings.ActiveProfile = name;
         try { ApplyLayout(1); }
@@ -477,6 +548,7 @@ internal sealed class WindowManager : IDisposable
     internal void Assign(int account, nint handle)
     {
         if (account < 1 || account > Settings.Current.Slots.Count) throw new ArgumentOutOfRangeException(nameof(account), "Choose a slot in the active layout.");
+        RequireNoRestart("assigning windows");
         var other = Accounts.FirstOrDefault(p => p.Value.Handle == handle);
         var window = other.Value ?? Discover().FirstOrDefault(w => w.Handle == handle)
             ?? throw new InvalidOperationException("That window has closed.");
@@ -496,11 +568,138 @@ internal sealed class WindowManager : IDisposable
     }
     internal bool Forget(int account)
     {
+        RequireNoRestart("forgetting a window");
         if (!Accounts.Remove(account, out var window)) return false;
         forgotten.Add(Identity(window));
         Restore(window);
         ResetLayout();
         return true;
+    }
+    /// <summary>True once the game has put its frame back in repeated drift observations (see ObserveLayout).</summary>
+    internal bool GraphicsResetSuspected(ManagedWindow window) => frameRestored.GetValueOrDefault(Identity(window)) >= SuspectGraphicsResetAfter;
+    private void RequireNoRestart(string action)
+    {
+        if (restart is { } r) throw new InvalidOperationException($"Account {r.Account} is restarting. Wait for its new WoW window, or click Cancel restart, before {action}.");
+    }
+    /// <summary>
+    /// Closes one client and reserves its account for the next WoW client the user starts.
+    /// Only that client is touched: no layout pass, and the main account is unchanged.
+    /// Throws without changing anything when the process cannot be opened and verified.
+    /// </summary>
+    internal void BeginRestart(int account, ManagedWindow? expected = null)
+    {
+        RequireNoRestart("restarting another client");
+        if (Editing) throw new InvalidOperationException("Close Settings before restarting a client.");
+        if (account < 1 || account > Settings.Current.Slots.Count || !Accounts.TryGetValue(account, out var window) || !window.Valid)
+            throw new InvalidOperationException("That slot has no running WoW window.");
+        // The confirmation names one client; a nested message loop may have changed the slot since.
+        if (expected != null && !ReferenceEquals(window, expected))
+            throw new InvalidOperationException($"Account {account} changed while you were confirming. Nothing was closed; check the slot and try again.");
+        // No terminate right here: a client that cannot be force-ended can still close normally.
+        var process = Native.OpenProcess(Native.Synchronize | Native.ProcessQueryLimitedInformation, false, window.Pid);
+        if (process == 0) throw new InvalidOperationException($"Could not open WoW process {window.Pid}. If WoW runs as administrator, run this app at the same level.");
+        if (!Native.GetProcessTimes(process, out var created, out _, out _, out _) || DateTime.FromFileTimeUtc(created).Ticks != window.StartTicks)
+        {
+            Native.CloseHandle(process);
+            throw new InvalidOperationException("That WoW process has changed. Click Refresh and try again.");
+        }
+        CancelSwaps($"restart of account {account}");
+        Accounts.Remove(account);
+        restart = new PendingRestart(account, window, process, DateTime.UtcNow.Ticks, RestartClock());
+        if (!CloseClient(window.Handle))
+        {
+            restart = null;
+            Native.CloseHandle(process);
+            Accounts[account] = window;
+            Publish();
+            throw new InvalidOperationException($"Could not ask WoW (PID {window.Pid}) to close.");
+        }
+        Program.LogLine($"Restart of account {account}: asked PID {window.Pid} (HWND {window.Handle}) to close; main {MainAccount}. The next WoW client that opens takes this account.");
+        Publish();
+        Changed?.Invoke();
+    }
+    /// <summary>Notices the old client's exit and ends a reservation that waited too long.</summary>
+    private void RefreshRestart()
+    {
+        if (restart is not { } r) return;
+        if (r.ExitedAt == null && Native.WaitForSingleObject(r.Process, 0) == Native.WaitObject0)
+        {
+            r.ExitedAt = RestartClock();
+            Program.LogLine($"Restart of account {r.Account}: PID {r.Old.Pid} exited after {r.ExitedAt - r.ClosedAt} ms. Waiting for a new WoW client.");
+            Changed?.Invoke();
+        }
+        if (RestartClock() - r.ClosedAt >= RestartTimeoutMs) EndRestart($"expired after {RestartTimeoutMs / 60000.0:0.#} min");
+    }
+    /// <summary>
+    /// Once per restart: the PID whose client has ignored the close request for
+    /// <see cref="RestartForceAfterMs"/>, so the UI can ask whether to end it. Null otherwise.
+    /// </summary>
+    internal int? ForceEndDue()
+    {
+        RefreshRestart();
+        if (restart is not { ExitedAt: null, ForceOffered: false } r || RestartClock() - r.ClosedAt < RestartForceAfterMs) return null;
+        r.ForceOffered = true;
+        return r.Old.Pid;
+    }
+    /// <summary>
+    /// Ends the old client. The reservation's open handle keeps its PID from being reused, so
+    /// the PID still names that process; its creation time is checked again anyway.
+    /// </summary>
+    internal void ForceEndRestart()
+    {
+        if (restart is not { ExitedAt: null } r || Native.WaitForSingleObject(r.Process, 0) == Native.WaitObject0) return;
+        var process = Native.OpenProcess(Native.ProcessTerminate | Native.ProcessQueryLimitedInformation, false, r.Old.Pid);
+        if (process == 0) throw new InvalidOperationException($"Could not end WoW (PID {r.Old.Pid}). If WoW runs as administrator, run this app at the same level, or close it yourself.");
+        try
+        {
+            if (!Native.GetProcessTimes(process, out var created, out _, out _, out _) || DateTime.FromFileTimeUtc(created).Ticks != r.Old.StartTicks
+                || !Native.TerminateProcess(process, 1))
+                throw new InvalidOperationException($"Could not end WoW (PID {r.Old.Pid}).");
+        }
+        finally { Native.CloseHandle(process); }
+        Program.LogLine($"Restart of account {r.Account}: ended PID {r.Old.Pid} at the user's request.");
+    }
+    internal void CancelRestart() => EndRestart("cancelled");
+    /// <summary>
+    /// Drops the reservation. A still-running old client gets its exact account back, with no
+    /// layout pass; once it has exited the slot stays empty for normal discovery or Catch.
+    /// </summary>
+    private void EndRestart(string reason)
+    {
+        if (restart is not { } r) return;
+        restart = null;
+        var exited = r.ExitedAt != null || Native.WaitForSingleObject(r.Process, 0) == Native.WaitObject0;
+        Native.CloseHandle(r.Process);
+        var restored = !exited && r.Old.Valid && !Accounts.ContainsKey(r.Account);
+        if (restored) Accounts[r.Account] = r.Old;
+        Program.LogLine($"Restart of account {r.Account} ended: {reason}; {(restored ? $"PID {r.Old.Pid} kept in its slot" : "slot left empty")}.");
+        status = restored ? $"Restart of account {r.Account} {reason}; PID {r.Old.Pid} stays in its slot"
+            : $"Restart of account {r.Account} {reason}; account {r.Account} is empty — start WoW, then use Catch / assign if it is not picked up";
+        Publish();
+        Changed?.Invoke();
+    }
+    private void AdoptRestart(PendingRestart r, ManagedWindow window)
+    {
+        restart = null;
+        Native.CloseHandle(r.Process);
+        Accounts[r.Account] = window;
+        Program.LogLine($"Restart of account {r.Account}: took PID {window.Pid} (HWND {window.Handle}, \"{window.Title}\"), the first WoW client opened since the restart, after {RestartClock() - r.ClosedAt} ms. Placing only this window.");
+        PlaceAccount(r.Account, window);
+        status = LayoutStatus();
+        Publish();
+        Changed?.Invoke();
+    }
+    /// <summary>Puts one client in its current slot, as an explicit layout would, without touching any other.</summary>
+    private void PlaceAccount(int account, ManagedWindow window)
+    {
+        if (account > Settings.Current.Slots.Count || !window.Valid) return;
+        var bounds = Settings.Current.Slots[SlotFor(account, MainAccount) - 1].Bounds;
+        var style = Native.GetWindowLongPtr(window.Handle, Native.GwlStyle);
+        var desired = Settings.Borderless ? (nint)((long)window.OriginalStyle & ~Native.BorderMask) : window.OriginalStyle;
+        var styleChanged = style != desired;
+        if (styleChanged) Native.SetWindowLongPtr(window.Handle, Native.GwlStyle, desired);
+        if (Native.IsIconic(window.Handle)) Native.ShowWindow(window.Handle, Native.SwShowNoActivate);
+        Native.Position(window.Handle, bounds, styleChanged);
     }
     internal void SaveCurrentPositions()
     {
@@ -655,5 +854,5 @@ internal sealed class WindowManager : IDisposable
                 _ => Native.SwShowNa,
             });
     }
-    public void Dispose() { CancelSwaps("exit"); foreach (var window in Accounts.Values) Restore(window); Accounts.Clear(); }
+    public void Dispose() { EndRestart("exit"); CancelSwaps("exit"); foreach (var window in Accounts.Values) Restore(window); Accounts.Clear(); }
 }

@@ -175,6 +175,7 @@ same core actions.
 | Toggle mouse focus | Ctrl+Shift+F by default (changeable in Settings) while WoW is active, or the controls / tray toggle |
 | Assign a running client | Select a slot and window, then **Catch / assign** |
 | Release a client | **Forget** restores its original borders and position |
+| Recover one stuck client | **Restart client** closes it; start WoW again and log in, and the new client takes its place |
 | Change profile, pause, or reapply layout | Controls or tray menu |
 | Edit layout, hotkeys, or app name | **Settings & layout**, or `Settings.cmd` |
 | Reopen controls | Double-click the tray icon, **Show controls**, or `Controls.cmd` |
@@ -255,6 +256,29 @@ You can rename `WoWWindowKit.exe` while it is closed; update the four generated
 executable regardless of its name. Windows Task Manager may show the executable
 name or embedded product metadata separately from the configured app name.
 
+### Restart client
+
+After a DX12 device loss a client can stay stuck at a size and frame it chooses
+itself, and each later resize fails again. Only a new game process clears it.
+The controls show such a client as *frame restored by game, suspected graphics
+reset* once two observations a second apart have seen the game's frame back.
+That is a hint, not proof.
+
+**Restart client** (in controls, for the selected slot) asks for confirmation,
+then closes only that client, as Alt+F4 would. WoWWindowKit never starts WoW
+itself, so start WoW again the way you normally do and log in. The next WoW client
+that opens takes the restarted account's number and slot, main or not; no other
+client is moved or restyled. While a restart is pending, the same button reads
+**Cancel restart**, and layout, profile, assignment and Settings changes wait.
+
+- If the client has not closed after 20 seconds, the app asks whether to end that
+  process. **Keep it** cancels the restart and leaves the client in its slot.
+- The reservation lasts 10 minutes. After that a client that is still running
+  keeps its slot; otherwise the slot stays empty for normal discovery or
+  **Catch / assign**.
+- Only one restart runs at a time. The app cannot tell which account a new client
+  logs into, so start one client at a time while a restart is pending.
+
 ## Troubleshooting
 
 | Symptom | What to check |
@@ -266,6 +290,7 @@ name or embedded product metadata separately from the configured app name.
 | **Settings fail to load** | The startup error says so and names `settings.json`. Inspect it and the previous save in `settings.json.bak`; check `app.log` beside the executable. |
 | **Another startup error** (for example, hotkeys could not be enabled) | Not a settings problem; details are in `app.log`. Check that no other tool blocks low-level keyboard hooks, and restart the app. |
 | **Tray warning: active window tracking is off** | The app could not write `window-tracking.restore` or change the Windows setting. Hover focus still works through the app's own activation; keep the application folder writable and restart to restore the faster path. |
+| **One client stays large, will not swap, or shows its frame again** | Its graphics device was probably reset (WoW's `Logs/gx.log` shows `Device context was lost`); Reapply layout does not fix it. Select its slot and click **Restart client** (see below). |
 | **Windows remain borderless after a crash** | Relaunch the app and exit normally, or restart the game clients. |
 
 Mouse focus uses Windows' active window tracking. Keyboard swaps and the hover

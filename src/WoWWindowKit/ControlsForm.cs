@@ -15,10 +15,13 @@ internal sealed class ControlsForm : Form
     private readonly Button catchWindow = new() { Name = "controlCatch", Text = "Catch / assign", AutoSize = true };
     private readonly Button forget = new() { Name = "controlForget", Text = "Forget", AutoSize = true };
     private readonly Button main = new() { Name = "controlMain", Text = "Make main", AutoSize = true };
+    private readonly Button restartClient = new() { Name = "controlRestart", Text = "Restart client", AutoSize = true };
+    private readonly Func<string, bool> confirm;
     private bool updating;
-    internal ControlsForm(WindowManager manager, Action<Action> run, Action<string> switchProfile, Action toggleMouse, Action togglePause, Action settings, Action exit)
+    internal ControlsForm(WindowManager manager, Action<Action> run, Action<string> switchProfile, Action toggleMouse, Action togglePause, Action settings, Action exit, Func<string, bool>? confirm = null)
     {
         this.manager = manager; this.run = run; this.switchProfile = switchProfile;
+        this.confirm = confirm ?? (text => DarkTheme.Confirm(this, text, manager.Settings.DisplayName, "Close client", "Keep it"));
         this.toggleMouse = toggleMouse; this.togglePause = togglePause;
         Text = manager.Settings.DisplayName; Font = DarkTheme.CreateFont();
         StartPosition = FormStartPosition.CenterScreen; AutoScaleMode = AutoScaleMode.Dpi;
@@ -36,7 +39,7 @@ internal sealed class ControlsForm : Form
         root.Controls.Add(new Label { Text = "Select a slot above, then choose a running window:", AutoSize = true, Padding = new Padding(0, 5, 0, 0) }, 0, 3);
         root.Controls.Add(windows, 0, 4);
         var actions = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false };
-        actions.Controls.AddRange([catchWindow, forget, main]);
+        actions.Controls.AddRange([catchWindow, forget, main, restartClient]);
         var refresh = new Button { Text = "Refresh", AutoSize = true };
         refresh.Click += (_, _) => run(() => { manager.Rescan(); RefreshState(); RefreshWindows(); });
         actions.Controls.Add(refresh); root.Controls.Add(actions, 0, 5);
@@ -62,6 +65,14 @@ internal sealed class ControlsForm : Form
         });
         forget.Click += (_, _) => run(() => { if (SelectedSlot is { } slot) manager.Forget(slot); RefreshState(); RefreshWindows(); });
         main.Click += (_, _) => run(() => { if (SelectedSlot is { } slot) manager.Swap(slot); RefreshState(); });
+        restartClient.Click += (_, _) => run(() =>
+        {
+            if (manager.RestartingAccount != null) manager.CancelRestart();
+            else if (SelectedSlot is { } slot && manager.Accounts.TryGetValue(slot, out var client) && client.Valid
+                && this.confirm($"Close WoW for account {slot} (PID {client.Pid})?\r\n\r\nThe client closes as with Alt+F4. Then start WoW again yourself and log in: the next WoW client that opens takes account {slot}'s place. Other clients are not touched."))
+                manager.BeginRestart(slot, client);
+            RefreshState(); RefreshWindows();
+        });
         FormClosing += (_, e) =>
         {
             // WM_CLOSE from another process can be classified as TaskManagerClosing.
@@ -94,7 +105,9 @@ internal sealed class ControlsForm : Form
             {
                 manager.Accounts.TryGetValue(i + 1, out var client);
                 slots.Rows[i].Cells[1].Value = manager.Settings.Current.Slots[i].Hotkey;
-                slots.Rows[i].Cells[2].Value = client?.Valid == true ? $"{(manager.MainAccount == i + 1 ? "Main · " : "")}PID {client.Pid} · {client.Title}" : "Empty";
+                slots.Rows[i].Cells[2].Value = manager.RestartingAccount == i + 1 ? (manager.RestartAwaitingClient ? "Restarting · waiting for the next WoW client" : "Restarting · closing WoW")
+                    : client?.Valid != true ? "Empty"
+                    : $"{(manager.MainAccount == i + 1 ? "Main · " : "")}PID {client.Pid} · {client.Title}{(manager.GraphicsResetSuspected(client) ? " · frame restored by game, suspected graphics reset: restart may help" : "")}";
             }
             if (slots.CurrentRow == null && slots.Rows.Count > 0) slots.CurrentCell = slots.Rows[Math.Min(selected, slots.Rows.Count) - 1].Cells[0];
         }
@@ -119,7 +132,10 @@ internal sealed class ControlsForm : Form
         var slot = SelectedSlot;
         var assigned = slot.HasValue && manager.Accounts.TryGetValue(slot.Value, out var client) && client.Valid;
         catchWindow.Enabled = slot.HasValue && windows.SelectedItem is WindowChoice choice && choice.Window.Valid;
-        forget.Enabled = assigned; main.Enabled = assigned && !manager.Paused;
+        var restarting = manager.RestartingAccount != null;
+        forget.Enabled = assigned && !restarting; main.Enabled = assigned && !manager.Paused;
+        restartClient.Text = restarting ? "Cancel restart" : "Restart client";
+        restartClient.Enabled = restarting || assigned && !manager.Editing;
     }
     private sealed record WindowChoice(ManagedWindow Window, string Label) { public override string ToString() => Label; }
 }
