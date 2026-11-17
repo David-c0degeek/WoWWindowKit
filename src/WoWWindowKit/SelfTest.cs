@@ -779,7 +779,7 @@ internal static class SelfTest
             "Keeping a client that did not close restores its account with no window changes");
         manager.RestartTimeoutMs = 0;
         manager.BeginRestart(2); manager.Rescan();
-        Check(manager.RestartingAccount == null && ReferenceEquals(manager.Accounts[2], old) && manager.Status.Contains("expired", StringComparison.Ordinal) && manager.Status.Contains($"PID {old.Pid}", StringComparison.Ordinal),
+        Check(manager.RestartingAccount == null && ReferenceEquals(manager.Accounts[2], old) && manager.Message.Contains("expired", StringComparison.Ordinal) && manager.Message.Contains($"PID {old.Pid}", StringComparison.Ordinal),
             "An expired restart restores a still-running client to its account and says so");
         manager.RestartTimeoutMs = 10 * 60 * 1000;
         manager.BeginRestart(2);
@@ -792,7 +792,7 @@ internal static class SelfTest
         manager.Rescan();
         Check(manager.RestartAwaitingClient && manager.Accounts.Values.All(w => w.Valid), "Other clients keep running after a forced end");
         manager.CancelRestart(); manager.Rescan();
-        Check(manager.RestartingAccount == null && !manager.Accounts.ContainsKey(2) && manager.Status.Contains("Catch / assign", StringComparison.Ordinal), "Cancelling after the client exited leaves the slot empty and says what to do");
+        Check(manager.RestartingAccount == null && !manager.Accounts.ContainsKey(2) && manager.Message.Contains("Catch / assign", StringComparison.Ordinal), "Cancelling after the client exited leaves the slot empty and says what to do");
         Check(Refused(() => manager.BeginRestart(2)) && manager.RestartingAccount == null, "Restart refuses an empty slot without side effects");
         manager.CloseClient = defaultClose;
         manager.RestartForceAfterMs = 20000;

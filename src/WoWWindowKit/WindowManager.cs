@@ -45,7 +45,9 @@ internal sealed class WindowManager : IDisposable
     internal int MainAccount { get; private set; } = 1;
     internal bool Paused { get => paused; set { if (value) CancelQueuedSwap("paused"); paused = value; Publish(); } }
     internal bool Editing { get => editing; set { if (value) CancelQueuedSwap("editing"); editing = value; Publish(); } }
-    internal string Status => focusRefused ? "Windows refused focus — click a WoW window once, then retry" : RestartStatus ?? status;
+    internal string Status => focusRefused ? "Windows refused focus — click a WoW window once, then retry" : Message;
+    /// <summary>The restart or layout message, without the focus warning that can override it.</summary>
+    internal string Message => RestartStatus ?? status;
     internal Action? Changed;
 
     // ---- Swap scheduler: UI thread only (25 ms timer). Hover threads read only swapWaiting/settling. ----

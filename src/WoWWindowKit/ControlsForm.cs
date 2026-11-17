@@ -27,9 +27,11 @@ internal sealed class ControlsForm : Form
         StartPosition = FormStartPosition.CenterScreen; AutoScaleMode = AutoScaleMode.Dpi;
         Size = new Size(660, 500); MinimumSize = new Size(600, 440); Icon = Program.AppIcon;
         var root = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(14), ColumnCount = 1, RowCount = 7 };
-        foreach (var height in new[] { 38, 28, 0, 27, 35, 39, 36 }) root.RowStyles.Add(height == 0 ? new RowStyle(SizeType.Percent, 100) : new RowStyle(SizeType.Absolute, height));
+        // Button rows size to their buttons, so larger fonts or DPI cannot clip them.
+        foreach (var height in new[] { -1, 28, 0, 27, 35, -1, -1 })
+            root.RowStyles.Add(height == 0 ? new RowStyle(SizeType.Percent, 100) : height < 0 ? new RowStyle(SizeType.AutoSize) : new RowStyle(SizeType.Absolute, height));
         Controls.Add(root);
-        var toolbar = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false };
+        var toolbar = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink };
         toolbar.Controls.AddRange([profile, mouseFocus, pause]); root.Controls.Add(toolbar, 0, 0);
         root.Controls.Add(status, 0, 1);
         slots.Columns.Add(new DataGridViewTextBoxColumn { Name = "Number", HeaderText = "Slot", FillWeight = 35 });
@@ -38,12 +40,12 @@ internal sealed class ControlsForm : Form
         slots.RowTemplate.Height = 28; root.Controls.Add(slots, 0, 2);
         root.Controls.Add(new Label { Text = "Select a slot above, then choose a running window:", AutoSize = true, Padding = new Padding(0, 5, 0, 0) }, 0, 3);
         root.Controls.Add(windows, 0, 4);
-        var actions = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false };
+        var actions = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink };
         actions.Controls.AddRange([catchWindow, forget, main, restartClient]);
         var refresh = new Button { Text = "Refresh", AutoSize = true };
         refresh.Click += (_, _) => run(() => { manager.Rescan(); RefreshState(); RefreshWindows(); });
         actions.Controls.Add(refresh); root.Controls.Add(actions, 0, 5);
-        var footer = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false };
+        var footer = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink };
         var edit = new Button { Text = "Settings / layout", AutoSize = true };
         edit.Click += (_, _) => settings();
         var hide = new Button { Text = "Hide to tray", AutoSize = true };
